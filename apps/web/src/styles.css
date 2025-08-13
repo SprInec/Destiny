@@ -1,0 +1,206 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f8fafc;
+  --fg: #0f172a;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --muted: #475569;
+  --gold: #b8860b;
+  color-scheme: light;
+  --error-bg: #fee2e2;
+  --error-fg: #7f1d1d;
+  --error-border: #fecaca;
+}
+
+.dark {
+  --bg: #0b0f14;
+  --fg: #e5e7eb;
+  --card: #0e131a;
+  --border: #1f2937;
+  --muted: #94a3b8;
+  --gold: #d4af37;
+  color-scheme: dark;
+  --error-bg: #1a0f12;
+  --error-fg: #fca5a5;
+  --error-border: #7f1d1d;
+}
+
+body {
+  background-color: var(--bg) !important;
+  color: var(--fg) !important;
+}
+
+.card {
+  background-color: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  position: relative;
+  padding-bottom: 28px; /* space for fixed note if present */
+}
+
+/* 使卡片内的主内容区自动填满剩余高度，便于图表容器垂直居中 */
+.card-stretch { display: flex; flex-direction: column; }
+.card-stretch > .radar-box { flex: 1 1 auto; }
+
+/* Glowing frame for key cards */
+.glow {
+  position: relative;
+  overflow: visible;
+}
+.glow::before {
+  content: ""; position: absolute; inset: -2px; border-radius: inherit;
+  background: radial-gradient(120px 60px at 20% -20%, rgba(212,175,55,0.25), transparent 60%),
+              radial-gradient(120px 60px at 120% 120%, rgba(212,175,55,0.18), transparent 60%);
+  pointer-events: none;
+}
+
+/* Pillar card — modern minimal */
+.pillar-card {
+  position: relative;
+  border-radius: 0.75rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+.pillar { position: relative; overflow: hidden; }
+.pillar .pillar-tag { font-size: 10px; color: var(--muted); letter-spacing: .2em; }
+.pillar .pillar-han { letter-spacing: 0.35rem; font-weight: 800; }
+
+/* top accent line */
+/* removed top accent design */
+
+/* element badge */
+.pillar-badge { font-size: 10px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.pillar-badge[data-el="wood"] { color: #22c55e; border-color: rgba(34,197,94,0.35); }
+.pillar-badge[data-el="fire"] { color: #ef4444; border-color: rgba(239,68,68,0.35); }
+.pillar-badge[data-el="earth"]{ color: #eab308; border-color: rgba(234,179,8,0.35); }
+.pillar-badge[data-el="metal"]{ color: #f59e0b; border-color: rgba(245,158,11,0.35); }
+.pillar-badge[data-el="water"]{ color: #3b82f6; border-color: rgba(59,130,246,0.35); }
+
+/* pillar han color mapping */
+.pillar-card[data-el="wood"] .pillar-han { color: #22c55e; }
+.pillar-card[data-el="fire"] .pillar-han { color: #ef4444; }
+.pillar-card[data-el="earth"] .pillar-han { color: #eab308; }
+.pillar-card[data-el="metal"] .pillar-han { color: #f59e0b; }
+.pillar-card[data-el="water"] .pillar-han { color: #3b82f6; }
+
+/* Unified big radius for inner cards */
+.rounded-card { border-radius: 0.75rem; }
+
+/* Input group with icon */
+.input-group { position: relative; }
+.input-group .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); opacity: .7; }
+.input-group .input { padding-left: 2rem; }
+
+/* Fixed note spacing under panels */
+.panel-note { margin-top: 8px; min-height: 18px; }
+.panel-note-fixed { position: absolute; left: 16px; right: 16px; bottom: 12px; }
+
+/* Center radar in its card - always perfect center */
+.radar-box { display: grid; place-items: center; width: 100%; min-height: 360px; }
+
+/* Shield badges (GitHub style) */
+.shield {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: 999px; font-size: 12px;
+  background: var(--card); color: var(--fg);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+}
+.shield .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+
+/* Ten-gods strength badges */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+.badge-strong { background: rgba(16,185,129,0.12); color: #10b981; border-color: rgba(16,185,129,0.3); }
+.badge-medium { background: rgba(234,179,8,0.12); color: #eab308; border-color: rgba(234,179,8,0.35); }
+.badge-weak { background: rgba(239,68,68,0.12); color: #ef4444; border-color: rgba(239,68,68,0.35); }
+
+.gold { color: var(--gold); }
+.muted { color: var(--muted); }
+
+/* Unified UI controls */
+.input, .select {
+  background-color: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+.input::placeholder { color: var(--muted); }
+.input:focus, .select:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(212,175,55,0.2);
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background-color: var(--card);
+  color: var(--fg);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.75rem;
+}
+.btn-primary {
+  background-color: var(--gold);
+  border-color: var(--gold);
+  color: #111827;
+}
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.chip {
+  border: 1px solid var(--border);
+  background-color: var(--card);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 12px;
+}
+
+.alert {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 12px;
+}
+.alert-error {
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border-color: var(--error-border);
+}
+
+/* History list items */
+.list-item {
+  background-color: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: background-color .2s ease, border-color .2s ease, box-shadow .2s ease;
+}
+.list-item:hover { border-color: var(--gold); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
+
+/* Tooltip */
+.tooltip { position: relative; display: inline-block; }
+.tooltip .tooltip-content {
+  position: absolute; z-index: 9999; left: 50%; transform: translateX(-50%) translateY(8px);
+  min-width: 160px; max-width: 280px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--card); color: var(--fg);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2); font-size: 12px; line-height: 1.35; opacity: 0; pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+}
+.tooltip:hover .tooltip-content { opacity: 1; transform: translateX(-50%) translateY(4px); }
+
+/* Ensure tooltips are not clipped by ancestor overflow */
+.pillar { overflow: visible; }
+.pillar-card { overflow: visible; }
+
+/* Header branding subtle gradient */
+header { background: radial-gradient(60% 120% at 20% -20%, rgba(212,175,55,0.06), transparent 60%); }
+
+/* Pillar tooltip richer contrast */
+.pillar .tooltip-content { white-space: nowrap; }
+
