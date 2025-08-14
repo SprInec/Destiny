@@ -1,6 +1,8 @@
 import dayjs from 'dayjs';
 import tz from 'moment-timezone';
 import { Lunar, EightChar } from 'lunar-javascript';
+import { NAYIN_MAP as NAYIN_TABLE, getNaYin as getNaYinFromFile } from './data/nayin';
+import { SHENSHA_RULES, ShenShaRule, toArr } from './data/shensha';
 
 export type BaziInput = {
   datetime: string; // ISO or yyyy-MM-ddTHH:mm
@@ -43,7 +45,8 @@ export type BaziResult = {
   month: Pillar;
   day: Pillar;
   hour: Pillar;
-  emptyBranches: string[];
+  emptyBranches: string[]; // 保留兼容性，主要用日柱空亡
+  xunKong: { year: string[]; month: string[]; day: string[]; hour: string[] }; // 各柱空亡详情
   fiveElementPower: FiveElementPower;
   tenGods: { year: string; month: string; day: string; hour: string };
   luckCycles: { daYun: DaYun[]; liuNian: LiuNian[] };
@@ -57,6 +60,10 @@ export type BaziResult = {
   graph: {
     nodes: { id: string; label: string; kind: 'stem'|'branch'; element: keyof FiveElementPower }[];
     edges: { source: string; target: string; relation: '生'|'克'|'同'; weight: number }[];
+  };
+  branchGraph: {
+    nodes: { id: string; label: string; kind: 'branch'; element: keyof FiveElementPower }[];
+    edges: { source: string; target: string; relation: string; weight: number }[];
   };
   stars: { name: string; hits: string[] }[];
   tenGodsDetail: {
@@ -124,22 +131,7 @@ function getHiddenStemsOfBranch(branch: string): string[] {
   return map[branch] || [];
 }
 
-const NAYIN_MAP: Record<string,string> = {
-  '甲子':'海中金','乙丑':'海中金','丙寅':'炉中火','丁卯':'炉中火','戊辰':'大林木','己巳':'大林木',
-  '庚午':'路旁土','辛未':'路旁土','壬申':'剑锋金','癸酉':'剑锋金','甲戌':'山头火','乙亥':'山头火',
-  '丙子':'涧下水','丁丑':'涧下水','戊寅':'城头土','己卯':'城头土','庚辰':'白蜡金','辛巳':'白蜡金',
-  '壬午':'杨柳木','癸未':'杨柳木','甲申':'井泉水','乙酉':'井泉水','丙戌':'屋上土','丁亥':'屋上土',
-  '戊子':'霹雳火','己丑':'霹雳火','庚寅':'松柏木','辛卯':'松柏木','壬辰':'长流水','癸巳':'长流水',
-  '甲午':'沙中金','乙未':'沙中金','丙申':'山下火','丁酉':'山下火','戊戌':'平地木','己亥':'平地木',
-  '庚子':'壁上土','辛丑':'壁上土','壬寅':'金箔金','癸卯':'金箔金','甲辰':'覆灯火','乙巳':'覆灯火',
-  '丙午':'天河水','丁未':'天河水','戊申':'大驿土','己酉':'大驿土','庚戌':'钗钏金','辛亥':'钗钏金',
-  '壬子':'桑柘木','癸丑':'桑柘木','甲寅':'大溪水','乙卯':'大溪水','丙辰':'沙中土','丁巳':'沙中土',
-  '戊午':'天上火','己未':'天上火','庚申':'石榴木','辛酉':'石榴木','壬戌':'大海水','癸亥':'大海水'
-};
-
-function getNaYin(stem: string, branch: string): string {
-  return NAYIN_MAP[`${stem}${branch}`] || '';
-}
+function getNaYin(stem: string, branch: string): string { return getNaYinFromFile(stem, branch); }
 
 type Element = keyof FiveElementPower;
 
@@ -271,6 +263,36 @@ function wenChangByDayStem(stem: string): string[] {
   };
   return map[stem] || [];
 }
+
+// 太极贵人：通用表（按日干取两支）
+function taiJiByDayStem(stem: string): string[] {
+  const map: Record<string, string[]> = {
+    '甲': ['子','午'], '乙': ['子','午'],
+    '丙': ['卯','酉'], '丁': ['卯','酉'],
+    '戊': ['辰','戌'],
+    '己': ['巳','亥'],
+    '庚': ['丑','未'], '辛': ['丑','未'],
+    '壬': ['寅','申'], '癸': ['寅','申']
+  };
+  return map[stem] || [];
+}
+
+// 金舆：通用表（按日干定支）
+function jinYuByDayStem(stem: string): string[] {
+  const map: Record<string,string> = {
+    '甲':'未','乙':'申','丙':'酉','丁':'戌','戊':'酉','己':'戌','庚':'亥','辛':'子','壬':'丑','癸':'寅'
+  };
+  return map[stem] ? [map[stem]] : [];
+}
+
+// 天医：通用表（按日支定）
+function tianYiByDayBranch(branch: string): string[] {
+  const map: Record<string,string> = {
+    '子':'未','丑':'申','寅':'酉','卯':'戌','辰':'亥','巳':'子',
+    '午':'丑','未':'寅','申':'卯','酉':'辰','戌':'巳','亥':'午'
+  };
+  return map[branch] ? [map[branch]] : [];
+}
 // 禄神：各日主禄位（简表）
 function luShenByDayStem(stem: string): string[] {
   const map: Record<string,string> = {
@@ -319,43 +341,109 @@ function tianXiByYearBranch(branch: string): string[] {
   };
   return map[branch] ? [map[branch]] : [];
 }
-function computeStars(dayStem: string, dayBranch: string, monthBranch: string, yearBranch: string, pillars: { branch:string }[]) {
+function computeStars(dayStem: string, dayBranch: string, monthBranch: string, yearBranch: string, pillars: { branch:string }[], monthNumber?: number, dayPillar?: string) {
   const labels = ['年','月','日','时'];
   const results: { name: string; hits: string[]; group?: string }[] = [];
   const group = sanHeGroup(dayBranch);
-  ['桃花','驿马','华盖'].forEach((s:any)=>{
-    const pos = starBranchByGroup(group, s as any);
-    if (!pos) return;
-    const hits = pillars.map((p,i)=> ({p,i})).filter(x=>x.p.branch===pos).map(x=>labels[x.i]);
-    if (hits.length) results.push({ name: s, hits, group: '吉曜' });
-  });
-  const tianyi = tianYiBranchesByDayStem(dayStem);
-  const wenchang = wenChangByDayStem(dayStem);
-  const lushen = luShenByDayStem(dayStem);
-  const yangren = yangRenByDayStem(dayStem);
-  const hongluan = hongLuanByYearBranch(yearBranch);
-  const tianxi = tianXiByYearBranch(yearBranch);
-  const guchen = guChenByYearBranch(yearBranch);
-  const guasu = guaSuByYearBranch(yearBranch);
-  const xianchi = xianChiByYearBranch(yearBranch);
-  const collect = (name:string, positions:string[]) => {
+  const collect = (name:string, positions:string[], groupOverride?: string) => {
     positions.forEach(pos => {
       const hits = pillars.map((p,i)=> ({p,i})).filter(x=>x.p.branch===pos).map(x=>labels[x.i]);
       if (hits.length) {
-        const group = (name==='天乙贵人'||name==='文昌') ? '贵人' : (['羊刃','孤辰','寡宿'].includes(name) ? '煞曜' : '吉曜');
-        results.push({ name, hits, group });
+        const grp = groupOverride || (['天乙贵人','文昌','太极贵人','天医'].includes(name) ? '贵人' : (['羊刃','孤辰','寡宿'].includes(name) ? '煞曜' : '吉曜'));
+        results.push({ name, hits, group: grp });
       }
     });
   };
-  collect('天乙贵人', tianyi);
-  collect('文昌', wenchang);
-  collect('禄神', lushen);
-  collect('羊刃', yangren);
-  collect('红鸾', hongluan);
-  collect('天喜', tianxi);
-  collect('孤辰', guchen);
-  collect('寡宿', guasu);
-  collect('咸池', xianchi);
+  
+  // 获取季节信息用于四废、四忌等
+  const getSeason = (month: number): string => {
+    if (month >= 2 && month <= 4) return '春';
+    if (month >= 5 && month <= 7) return '夏';
+    if (month >= 8 && month <= 10) return '秋';
+    return '冬';
+  };
+  
+  SHENSHA_RULES.forEach((rule: ShenShaRule) => {
+    const map = rule.map || {};
+    let positions: string[] = [];
+    
+    switch (rule.mode) {
+      case 'sanHe':
+        const pos = starBranchByGroup(group, rule.name as any);
+        if (pos) collect(rule.name, [pos], rule.group);
+        break;
+        
+      case 'byDayStemMap':
+        positions = toArr(map[dayStem] as any) as string[];
+        break;
+        
+      case 'byDayBranchMap':
+        positions = toArr(map[dayBranch] as any) as string[];
+        break;
+        
+      case 'byYearBranchMap':
+        positions = toArr(map[yearBranch] as any) as string[];
+        break;
+        
+      case 'byMonthBranchMap':
+        positions = toArr(map[monthBranch] as any) as string[];
+        break;
+        
+      case 'byMonthMap':
+        if (monthNumber) {
+          positions = toArr(map[monthNumber.toString()] as any) as string[];
+        }
+        break;
+        
+      case 'bySpecialDayPillar':
+        if (dayPillar && rule.specialPillars?.includes(dayPillar)) {
+          // 特殊日柱神煞，如果命中则在日柱显示
+          results.push({ name: rule.name, hits: ['日'], group: rule.group });
+        }
+        break;
+        
+      case 'bySeasonMap':
+        if (monthNumber && rule.seasonMap) {
+          const season = getSeason(monthNumber);
+          const seasonPillars = rule.seasonMap[season] || [];
+          if (dayPillar && seasonPillars.includes(dayPillar)) {
+            results.push({ name: rule.name, hits: ['日'], group: rule.group });
+          }
+        }
+        break;
+        
+      case 'sixConflict':
+      case 'sixHarm':
+      case 'threeClash':
+        if (rule.relations) {
+          const branches = pillars.map(p => p.branch);
+          rule.relations.forEach(rel => {
+            const fromIdx = branches.indexOf(rel.from);
+            const toIdx = branches.indexOf(rel.to);
+            if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+              const hitLabels = [labels[fromIdx], labels[toIdx]];
+              results.push({ name: rule.name, hits: hitLabels, group: rule.group });
+            }
+          });
+        }
+        break;
+        
+      case 'selfClash':
+        Object.entries(map).forEach(([branch, target]) => {
+          const indices = pillars.map((p, i) => p.branch === branch ? i : -1).filter(i => i >= 0);
+          if (indices.length >= 2) {
+            // 同一地支出现两次或以上才算自刑
+            const hitLabels = indices.map(i => labels[i]);
+            results.push({ name: rule.name, hits: hitLabels, group: rule.group });
+          }
+        });
+        break;
+    }
+    
+    if (positions && positions.length) {
+      collect(rule.name, positions, rule.group);
+    }
+  });
   return results;
 }
 
@@ -367,24 +455,35 @@ const JIA_ZI: string[] = (() => {
   return arr;
 })();
 
-function computeXunKongByDayPillar(dayPillar: string): string[] {
-  const idx = JIA_ZI.indexOf(dayPillar);
+// 计算单个柱的空亡
+function computeXunKongByPillar(pillar: string): string[] {
+  const idx = JIA_ZI.indexOf(pillar);
   if (idx >= 0) {
     const start = Math.floor(idx/10)*10;
     const startPillar = JIA_ZI[start];
     const startBranch = startPillar[1];
+    // 六旬空亡对应表
     const map: Record<string, string[]> = {
-      '子': ['戌','亥'],
-      '戌': ['申','酉'],
-      '申': ['午','未'],
-      '午': ['辰','巳'],
-      '辰': ['寅','卯'],
-      '寅': ['子','丑']
+      '子': ['戌','亥'], // 甲子旬空戌亥
+      '戌': ['申','酉'], // 甲戌旬空申酉
+      '申': ['午','未'], // 甲申旬空午未
+      '午': ['辰','巳'], // 甲午旬空辰巳
+      '辰': ['寅','卯'], // 甲辰旬空寅卯
+      '寅': ['子','丑']  // 甲寅旬空子丑
     };
-    if (map[startBranch]) return map[startBranch];
+    return map[startBranch] || [];
   }
-  // fallback via day xun methods if available
   return [];
+}
+
+// 计算各柱空亡情况
+function computeAllXunKong(yearPillar: string, monthPillar: string, dayPillar: string, hourPillar: string) {
+  return {
+    year: computeXunKongByPillar(yearPillar),
+    month: computeXunKongByPillar(monthPillar),
+    day: computeXunKongByPillar(dayPillar),
+    hour: computeXunKongByPillar(hourPillar)
+  };
 }
 
 function estimateFiveElementPower(year: string, month: string, day: string, hour: string): FiveElementPower {
@@ -439,12 +538,16 @@ export function calculateBazi(input: BaziInput): BaziResult {
     };
   };
 
+  // 计算各柱空亡
+  const xunKong = computeAllXunKong(yearPillar, monthPillar, dayPillar, hourPillar);
+  
+  // 保留原有的 emptyBranches 字段用于兼容性，主要使用日柱空亡
   const emptyStr = typeof (ec as any).getXunKong === 'function'
     ? (ec as any).getXunKong()
     : (typeof (lunar as any).getXunKong === 'function' ? (lunar as any).getXunKong() : '');
   const emptyBranches = (emptyStr && String(emptyStr).length > 0)
     ? String(emptyStr).split('')
-    : computeXunKongByDayPillar(dayPillar);
+    : xunKong.day;
 
   const fiveElementPower = estimateFiveElementPower(yearPillar, monthPillar, dayPillar, hourPillar);
 
@@ -507,12 +610,12 @@ export function calculateBazi(input: BaziInput): BaziResult {
 
   // Relationship graph (stems only)
   const nodes = [
-    { id: 'Y', label: yearPillar[0], kind: 'stem' as const, element: elementOfStem(yearPillar[0]) },
-    { id: 'M', label: monthPillar[0], kind: 'stem' as const, element: elementOfStem(monthPillar[0]) },
-    { id: 'D', label: dayPillar[0], kind: 'stem' as const, element: elementOfStem(dayPillar[0]) },
-    { id: 'H', label: hourPillar[0], kind: 'stem' as const, element: elementOfStem(hourPillar[0]) }
+    { id: '年', label: yearPillar[0], kind: 'stem' as const, element: elementOfStem(yearPillar[0]) },
+    { id: '月', label: monthPillar[0], kind: 'stem' as const, element: elementOfStem(monthPillar[0]) },
+    { id: '日', label: dayPillar[0], kind: 'stem' as const, element: elementOfStem(dayPillar[0]) },
+    { id: '时', label: hourPillar[0], kind: 'stem' as const, element: elementOfStem(hourPillar[0]) }
   ];
-  const pairIds: [string, string][] = [['D','Y'],['D','M'],['D','H'],['Y','M'],['M','H'],['Y','H']];
+  const pairIds: [string, string][] = [['日','年'],['日','月'],['日','时'],['年','月'],['月','时'],['年','时']];
   const relationOf = (a: Element, b: Element): '生'|'克'|'同' => {
     if (a === b) return '同';
     if (elementGeneratedBy(a) === b) return '生';
@@ -527,12 +630,84 @@ export function calculateBazi(input: BaziInput): BaziResult {
     return { source: s, target: t, relation: rel, weight };
   });
 
+  // Branch relationship graph (地支关系图)
+  const branchNodes = [
+    { id: '年支', label: yearPillar[1], kind: 'branch' as const, element: elementOfBranch(yearPillar[1]) },
+    { id: '月支', label: monthPillar[1], kind: 'branch' as const, element: elementOfBranch(monthPillar[1]) },
+    { id: '日支', label: dayPillar[1], kind: 'branch' as const, element: elementOfBranch(dayPillar[1]) },
+    { id: '时支', label: hourPillar[1], kind: 'branch' as const, element: elementOfBranch(hourPillar[1]) }
+  ];
+  
+  // 地支关系判断
+  const getBranchRelation = (branch1: string, branch2: string): string => {
+    // 三合关系
+    const sanHe: Record<string, string[]> = {
+      '申子辰': ['申','子','辰'], // 水局
+      '寅午戌': ['寅','午','戌'], // 火局
+      '巳酉丑': ['巳','酉','丑'], // 金局
+      '亥卯未': ['亥','卯','未']  // 木局
+    };
+    for (const [name, branches] of Object.entries(sanHe)) {
+      if (branches.includes(branch1) && branches.includes(branch2)) {
+        if (name === '申子辰') return '三合水局';
+        if (name === '寅午戌') return '三合火局';
+        if (name === '巳酉丑') return '三合金局';
+        if (name === '亥卯未') return '三合木局';
+        return '三合';
+      }
+    }
+    
+    // 六合关系
+    const liuHe: Record<string, string> = {
+      '子丑': '合化土', '寅亥': '合化木', '卯戌': '合化火',
+      '辰酉': '合化金', '巳申': '合化水', '午未': '合化土'
+    };
+    const pair1 = branch1 + branch2;
+    const pair2 = branch2 + branch1;
+    if (liuHe[pair1]) return liuHe[pair1];
+    if (liuHe[pair2]) return liuHe[pair2];
+    
+    // 相冲关系
+    const chong: Record<string, string> = {
+      '子午': '相冲', '丑未': '相冲', '寅申': '相冲',
+      '卯酉': '相冲', '辰戌': '相冲', '巳亥': '相冲'
+    };
+    if (chong[pair1] || chong[pair2]) return '相冲';
+    
+    // 相害关系
+    const hai: Record<string, string> = {
+      '子未': '相害', '丑午': '相害', '寅巳': '相害',
+      '卯辰': '相害', '申亥': '相害', '酉戌': '相害'
+    };
+    if (hai[pair1] || hai[pair2]) return '相害';
+    
+    // 相刑关系
+    const xing: Record<string, string> = {
+      '寅巳': '相刑', '巳申': '相刑', '申寅': '相刑',
+      '丑戌': '相刑', '戌未': '相刑', '未丑': '相刑',
+      '子卯': '相刑', '卯子': '相刑'
+    };
+    if (xing[pair1] || xing[pair2]) return '相刑';
+    
+    return '无关';
+  };
+  
+  const branchPairs: [string, string][] = [['年支','月支'],['年支','日支'],['年支','时支'],['月支','日支'],['月支','时支'],['日支','时支']];
+  const branchEdges = branchPairs.map(([s,t]) => {
+    const ns = branchNodes.find(n=>n.id===s)!; 
+    const nt = branchNodes.find(n=>n.id===t)!;
+    const rel = getBranchRelation(ns.label, nt.label);
+    const weight = rel.includes('合') ? 2 : rel === '相冲' ? 1.5 : rel === '相害' ? 1 : rel === '相刑' ? 1 : 0.5;
+    return { source: s, target: t, relation: rel, weight };
+  }).filter(e => e.relation !== '无关'); // 只显示有关系的连线
+
+  const monthNumber = (lunar as any).getMonth?.() || new Date().getMonth() + 1;
   const stars = computeStars(dayPillar[0], dayPillar[1], monthPillar[1], yearPillar[1], [
     { branch: yearPillar[1] },
     { branch: monthPillar[1] },
     { branch: dayPillar[1] },
     { branch: hourPillar[1] }
-  ]);
+  ], monthNumber, dayPillar);
 
   // Ten gods strength scoring (simplified): consider 得令/通根/透出
   const monthB = monthPillar[1];
@@ -552,6 +727,7 @@ export function calculateBazi(input: BaziInput): BaziResult {
     day: mk(dayPillar),
     hour: mk(hourPillar),
     emptyBranches,
+    xunKong,
     fiveElementPower,
     tenGods,
     luckCycles: { daYun, liuNian },
@@ -565,6 +741,7 @@ export function calculateBazi(input: BaziInput): BaziResult {
              '日主中和，宜顺势扶抑得宜，四时平衡。'
     },
     graph: { nodes, edges },
+    branchGraph: { nodes: branchNodes, edges: branchEdges },
     stars,
     tenGodsDetail,
     tenGodsStrength: strengthMap

@@ -10,11 +10,15 @@
     "build": "npm run -ws build",
     "dev": "npm run -ws dev",
     "lint": "npm run -ws lint",
-    "test": "npm run -ws test"
+    "test": "npm run -ws test",
+    "dev:all": "npx --yes concurrently -n api,web -c \"magenta.bold,cyan.bold\" \"cd apps\\api && npx --yes tsx watch src/index.ts\" \"cd apps\\web && npm run dev\""
   },
   "engines": {
     "node": ">=18.17.0"
   },
-  "packageManager": "npm@10.8.1"
+  "packageManager": "npm@10.8.1",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
 }
 
