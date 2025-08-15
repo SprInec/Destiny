@@ -4,8 +4,14 @@ metadata:
   name: destiny-web
   labels:
     app: destiny-web
+    version: v1.0.0
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app: destiny-web
@@ -13,34 +19,72 @@ spec:
     metadata:
       labels:
         app: destiny-web
+        version: v1.0.0
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       containers:
       - name: destiny-web
-        image: your-registry/destiny-web:latest
+        image: registry.cn-hangzhou.aliyuncs.com/your-namespace/destiny-web:latest
+        imagePullPolicy: Always
         ports:
-        - containerPort: 80
+        - containerPort: 8080
+          name: http
+          protocol: TCP
         env:
         - name: VITE_API_URL
-          value: "https://your-api-domain.sealos.run"
+          value: "https://destiny-api.your-namespace.sealos.run"
+        - name: TZ
+          value: "Asia/Shanghai"
         resources:
           requests:
             memory: "128Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "512Mi"
+            cpu: "500m"
         livenessProbe:
           httpGet:
             path: /health
-            port: 80
+            port: 8080
+            scheme: HTTP
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /health
-            port: 80
+            port: 8080
+            scheme: HTTP
           initialDelaySeconds: 5
           periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          capabilities:
+            drop:
+            - ALL
 
 ---
 apiVersion: v1
@@ -49,13 +93,15 @@ metadata:
   name: destiny-web
   labels:
     app: destiny-web
+    version: v1.0.0
 spec:
   selector:
     app: destiny-web
   ports:
-  - port: 80
-    targetPort: 80
+  - port: 8080
+    targetPort: 8080
     protocol: TCP
+    name: http
   type: ClusterIP
 
 ---
@@ -63,17 +109,23 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: destiny-web-ingress
+  labels:
+    app: destiny-web
   annotations:
     kubernetes.io/ingress.class: nginx
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
 spec:
   tls:
   - hosts:
-    - your-web-domain.sealos.run
+    - destiny-web.your-namespace.sealos.run
     secretName: destiny-web-tls
   rules:
-  - host: your-web-domain.sealos.run
+  - host: destiny-web.your-namespace.sealos.run
     http:
       paths:
       - path: /
@@ -82,4 +134,4 @@ spec:
           service:
             name: destiny-web
             port:
-              number: 80
+              number: 8080

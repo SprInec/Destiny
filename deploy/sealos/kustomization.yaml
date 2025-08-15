@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: destiny-app
+  
+resources:
+  - api-deployment.yaml
+  - api-ingress.yaml
+  - web-deployment.yaml
+
+namespace: destiny
+
+commonLabels:
+  app.kubernetes.io/name: destiny
+  app.kubernetes.io/instance: destiny-prod
+  app.kubernetes.io/component: web-app
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: registry.cn-hangzhou.aliyuncs.com/your-namespace/destiny-api
+    newTag: latest
+  - name: registry.cn-hangzhou.aliyuncs.com/your-namespace/destiny-web
+    newTag: latest
+
+configMapGenerator:
+  - name: destiny-config
+    literals:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+
+replicas:
+  - name: destiny-api
+    count: 2
+  - name: destiny-web
+    count: 2

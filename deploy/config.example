@@ -1,0 +1,63 @@
+# Destiny 项目部署环境配置示例
+# 复制此文件为 config 并修改相应配置
+
+# ===========================================
+# 基础配置
+# ===========================================
+
+# 项目版本
+VERSION=v1.0.0
+
+# 命名空间（替换为您的实际命名空间）
+NAMESPACE=your-namespace
+
+# 镜像仓库配置
+REGISTRY=registry.cn-hangzhou.aliyuncs.com
+
+# ===========================================
+# 域名配置
+# ===========================================
+
+# API 服务域名
+API_DOMAIN=destiny-api.${NAMESPACE}.sealos.run
+
+# Web 应用域名
+WEB_DOMAIN=destiny-web.${NAMESPACE}.sealos.run
+
+# ===========================================
+# 应用配置
+# ===========================================
+
+# 运行环境
+NODE_ENV=production
+
+# 时区设置
+TZ=Asia/Shanghai
+
+# API 服务端口
+API_PORT=3001
+
+# Web 服务端口
+WEB_PORT=8080
+
+# ===========================================
+# 资源配置
+# ===========================================
+
+# API 服务副本数
+API_REPLICAS=2
+
+# Web 服务副本数
+WEB_REPLICAS=2
+
+# API 服务资源配置
+API_CPU_REQUEST=250m
+API_CPU_LIMIT=1000m
+API_MEMORY_REQUEST=256Mi
+API_MEMORY_LIMIT=1Gi
+
+# Web 服务资源配置
+WEB_CPU_REQUEST=100m
+WEB_CPU_LIMIT=500m
+WEB_MEMORY_REQUEST=128Mi
+WEB_MEMORY_LIMIT=512Mi
