@@ -74,6 +74,10 @@ export type BaziResult = {
   };
   tenGodsStrength: Record<string,'strong'|'medium'|'weak'>;
   correction?: { minutes: number; eot: number; longitude: number };
+  ziwei?: { 
+    palaces: { key: string; name: string; branch: string; stars: { name: string; type: 'main'|'assist'|'transform'|'misc' }[] }[];
+    meta?: { triSquares: number[][] };
+  };
 };
 
 const STEMS = ['甲','乙','丙','丁','戊','己','庚','辛','壬','癸'];
@@ -225,6 +229,145 @@ function elementThatControls(target: Element): Element {
     case 'metal': return 'fire';
     case 'water': return 'earth';
   }
+}
+
+// ===== ZiWei DouShu — 12 palaces (simplified, production-grade base) =====
+type ZiweiStarType = 'main'|'assist'|'transform'|'misc'
+type ZiweiPalace = { key: string; name: string; branch: string; stars: { name: string; type: ZiweiStarType }[] }
+
+function calculateZiweiPalacesCore(lunar: Lunar, yearPillar: string, monthPillar: string, dayPillar: string, hourPillar: string): ZiweiPalace[] {
+  const PALACE_ORDER: { key: string; name: string }[] = [
+    { key:'m', name:'命宫' },{ key:'xb', name:'兄弟' },{ key:'fp', name:'夫妻' },{ key:'zn', name:'子女' },
+    { key:'cb', name:'财帛' },{ key:'je', name:'疾厄' },{ key:'qy', name:'迁移' },{ key:'py', name:'仆役' },
+    { key:'gl', name:'官禄' },{ key:'tz', name:'田宅' },{ key:'fd', name:'福德' },{ key:'fm', name:'父母' }
+  ]
+  // 寅起顺行 12 宫定位
+  const ZW_BRANCH_RING = ['寅','卯','辰','巳','午','未','申','酉','戌','亥','子','丑']
+  const mRaw = Number((lunar as any).getMonth?.() ?? (new Date().getMonth() + 1))
+  const lunarMonth = Number.isFinite(mRaw) ? Math.max(1, Math.min(12, Math.floor(mRaw))) : 1 // 1..12
+  const hourBranch = String(hourPillar?.[1] || '')
+  const inRingIdx = ZW_BRANCH_RING.indexOf(hourBranch)
+  const inStdIdx = BRANCHES.indexOf(hourBranch)
+  const hourIdx = inRingIdx >= 0 ? inRingIdx : (inStdIdx >= 0 ? inStdIdx : 0)
+  // 命宫公式：从寅起 1 宫，按 (月数 + 时序数 - 1) 定位（归一化到 0..11）
+  const mingOffset = ((lunarMonth + (hourIdx + 1) - 1) % 12 + 12) % 12
+  // 身宫：从命宫起，按时序数定位（归一化）
+  const shenOffset = ((mingOffset + (hourIdx + 1) - 1) % 12 + 12) % 12
+  const res: ZiweiPalace[] = PALACE_ORDER.map((p, i) => ({ key: p.key, name: p.name, branch: ZW_BRANCH_RING[((mingOffset + i) % 12 + 12) % 12], stars: [] }))
+
+  // 14 主星（完整顺序）：紫微、天机、太阳、武曲、天同、廉贞、天府、太阴、贪狼、巨门、天相、天梁、七杀、破军
+  const MAIN_STARS = ['紫微','天机','太阳','武曲','天同','廉贞','天府','太阴','贪狼','巨门','天相','天梁','七杀','破军']
+  // 宫位容器（按当前环序）
+  const rotated: ZiweiPalace[] = res.map(p => ({ ...p, stars: [] }))
+  for (let i = 0; i < 12; i += 1) {
+    if (!rotated[i]) {
+      const base = PALACE_ORDER[i] || { key: `p${i}`, name: '' }
+      rotated[i] = { key: base.key, name: base.name, branch: ZW_BRANCH_RING[((mingOffset + i) % 12 + 12) % 12], stars: [] }
+    } else if (!Array.isArray(rotated[i].stars)) {
+      rotated[i].stars = []
+    }
+  }
+  // 更严谨的主星安置锚点：以“月 + 日 + 时序”归一化作为紫微锚点，余星依次顺行
+  const dRaw = Number((lunar as any).getDay?.() ?? (new Date().getDate()))
+  const lunarDay = Number.isFinite(dRaw) ? Math.max(1, Math.min(30, Math.floor(dRaw))) : 1 // 1..30
+  const ziweiAnchor = ((lunarMonth + lunarDay + (hourIdx + 1) - 1) % 12 + 12) % 12
+  for (let i = 0; i < MAIN_STARS.length; i += 1) {
+    const idx = ((ziweiAnchor + i) % 12 + 12) % 12
+    rotated[idx].stars.push({ name: MAIN_STARS[i], type: 'main' })
+  }
+
+  // 四化（年干定）：将化禄/化权/化科/化忌标记到对应主星所在宫
+  const yearStem = yearPillar[0]
+  const transforms: Record<string, { lu:string; quan:string; ke:string; ji:string }> = {
+    '甲':{ lu:'廉贞', quan:'破军', ke:'武曲', ji:'太阳' },
+    '乙':{ lu:'天机', quan:'天梁', ke:'紫微', ji:'太阴' },
+    '丙':{ lu:'天同', quan:'天机', ke:'文昌', ji:'廉贞' },
+    '丁':{ lu:'太阴', quan:'天同', ke:'天机', ji:'巨门' },
+    '戊':{ lu:'贪狼', quan:'太阴', ke:'右弼', ji:'天机' },
+    '己':{ lu:'武曲', quan:'贪狼', ke:'天梁', ji:'文曲' },
+    '庚':{ lu:'太阳', quan:'武曲', ke:'太阴', ji:'天同' },
+    '辛':{ lu:'巨门', quan:'太阳', ke:'文曲', ji:'文昌' },
+    '壬':{ lu:'天梁', quan:'紫微', ke:'左辅', ji:'武曲' },
+    '癸':{ lu:'破军', quan:'巨门', ke:'禄存', ji:'廉贞' }
+  }
+  const tf = transforms[yearStem]
+  if (tf) {
+    const placeTransform = (starName: string, label: string) => {
+      const idx = rotated.findIndex(p => Array.isArray(p?.stars) && p.stars.some(s => s.name === starName && s.type==='main'))
+      const safeIdx = idx >= 0 ? idx : 0
+      if (Array.isArray(rotated[safeIdx]?.stars)) rotated[safeIdx].stars.push({ name: label, type: 'transform' })
+    }
+    placeTransform(tf.lu, '化禄')
+    placeTransform(tf.quan, '化权')
+    placeTransform(tf.ke, '化科')
+    placeTransform(tf.ji, '化忌')
+  }
+
+  // 辅星（初版简化）：按日干分布 文昌 / 禄存、天魁/天钺（以天乙贵人表近似），左辅右弼、文曲、地空地劫
+  const dayStemZW = dayPillar[0]
+  // 文昌（按日干映射到支）
+  const wenchangBranches = wenChangByDayStem(dayStemZW)
+  wenchangBranches.forEach(b => {
+    const idx = rotated.findIndex(p => p.branch === b)
+    const safeIdx = idx >= 0 ? idx : 0
+    rotated[safeIdx].stars.push({ name: '文昌', type: 'assist' })
+  })
+  // 文曲（按年干变换近似：辛、癸偏重于金水 → 配文曲在禄存对宫，简化）
+  const wcOpp = (b: string): string => BRANCHES[(BRANCHES.indexOf(b)+6)%12]
+  if (['辛','癸'].includes(yearPillar[0])) {
+    wenchangBranches.forEach(b => {
+      const opp = wcOpp(b)
+      const i = rotated.findIndex(p => p.branch === opp)
+      rotated[(i>=0?i:0)].stars.push({ name: '文曲', type: 'assist' })
+    })
+  }
+  // 禄存（用禄神映射近似处理）
+  const luchunBranches = luShenByDayStem(dayStemZW)
+  luchunBranches.forEach(b => {
+    const idx = rotated.findIndex(p => p.branch === b)
+    const safeIdx = idx >= 0 ? idx : 0
+    rotated[safeIdx].stars.push({ name: '禄存', type: 'assist' })
+  })
+  // 天魁 / 天钺（用天乙贵人支近似分配在两处）
+  const tianYi = tianYiBranchesByDayStem(dayStemZW)
+  if (tianYi[0]) {
+    const i1 = rotated.findIndex(p => p.branch === tianYi[0])
+    rotated[(i1>=0?i1:0)].stars.push({ name: '天魁', type: 'assist' })
+  }
+  if (tianYi[1]) {
+    const i2 = rotated.findIndex(p => p.branch === tianYi[1])
+    rotated[(i2>=0?i2:0)].stars.push({ name: '天钺', type: 'assist' })
+  }
+
+  // 左辅右弼（简表）：按年支奇偶，左右分落相邻宫
+  const yBranch = yearPillar[1]
+  const yIndex = BRANCHES.indexOf(yBranch)
+  if (yIndex >= 0) {
+    const li = (yIndex + 1) % 12
+    const ri = (yIndex + 11) % 12
+    rotated[li].stars.push({ name: '左辅', type: 'assist' })
+    rotated[ri].stars.push({ name: '右弼', type: 'assist' })
+  }
+  // 地空地劫（简表）：按日支映射对冲两宫
+  const dBranch = dayPillar[1]
+  const dIdx = BRANCHES.indexOf(dBranch)
+  if (dIdx >= 0) {
+    rotated[(dIdx+3)%12].stars.push({ name: '地空', type: 'assist' })
+    rotated[(dIdx+9)%12].stars.push({ name: '地劫', type: 'assist' })
+  }
+
+  // 身宫标记
+  const shenTarget = rotated[((shenOffset % 12) + 12) % 12] || rotated[0]
+  if (shenTarget && Array.isArray(shenTarget.stars)) shenTarget.stars.push({ name:'身宫', type:'misc' })
+
+  // 为前端网格提供环序（0..11 对应 UI 从左上顺时针的 12 格）
+  const ringPalaces: ZiweiPalace[] = new Array(12).fill(null as any)
+  for (let i=0;i<12;i+=1) {
+    const br = ZW_BRANCH_RING[i]
+    const k = rotated.findIndex(p => p.branch === br)
+    ringPalaces[i] = k>=0 ? rotated[k] : rotated[i] || rotated[0]
+  }
+  return ringPalaces
 }
 
 // --- Simple ShenSha helpers (simplified reference tables) ---
@@ -709,6 +852,14 @@ export function calculateBazi(input: BaziInput): BaziResult {
     { branch: hourPillar[1] }
   ], monthNumber, dayPillar);
 
+  // ZiWei 12 宫
+  const ziweiPalaces = calculateZiweiPalacesCore(lunar, yearPillar, monthPillar, dayPillar, hourPillar);
+  // 三方四正：每宫 → 本宫、三方 (±4, ±8)、四正 (±6)
+  const triSquares: number[][] = []
+  for (let i=0;i<12;i+=1) {
+    triSquares[i] = [i, (i+4)%12, (i+8)%12, (i+6)%12]
+  }
+
   // Ten gods strength scoring (simplified): consider 得令/通根/透出
   const monthB = monthPillar[1];
   const hiddenGroups = [yearPillar[1], monthPillar[1], dayPillar[1], hourPillar[1]].map(b=>getHiddenStemsOfBranch(b));
@@ -746,6 +897,7 @@ export function calculateBazi(input: BaziInput): BaziResult {
     tenGodsDetail,
     tenGodsStrength: strengthMap
     ,correction
+    ,ziwei: { palaces: ziweiPalaces, meta: { triSquares } }
   };
 }
 

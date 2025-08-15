@@ -1,9 +1,18 @@
 import { useMemo, useState } from 'react'
 import axios from 'axios'
 import * as echarts from 'echarts'
-import { useEffect, useRef } from 'react'
+// Leaflet is optional at type-level; import dynamically for runtime map rendering
+// @ts-ignore
+import 'leaflet/dist/leaflet.css'
+// @ts-ignore
+import L from 'leaflet'
+// @ts-ignore - optional runtime dependency for better tz pickup; fallback to offset method if missing
+import tzLookup from 'tz-lookup'
+import { useEffect, useRef, forwardRef } from 'react'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
+import DatePicker from 'react-datepicker'
+import 'react-datepicker/dist/react-datepicker.css'
 
 type CalcResp = {
   year: any; month: any; day: any; hour: any;
@@ -235,24 +244,70 @@ function computeShenShaPositions(pillars: { branch:string }[], dayBranch: string
   return results
 }
 
+// ===== ZiWei chart types and helpers =====
+type ZiweiStarType = 'main' | 'assist' | 'transform' | 'misc'
+type ZiweiPalace = { key: string; name: string; stars: { name: string; type: ZiweiStarType }[] }
+
+const ZW_PALACE_ORDER: { key: string; name: string }[] = [
+  { key:'m', name:'命宫' },{ key:'xb', name:'兄弟' },{ key:'fp', name:'夫妻' },{ key:'zn', name:'子女' },
+  { key:'cb', name:'财帛' },{ key:'je', name:'疾厄' },{ key:'qy', name:'迁移' },{ key:'py', name:'仆役' },
+  { key:'gl', name:'官禄' },{ key:'tz', name:'田宅' },{ key:'fd', name:'福德' },{ key:'fm', name:'父母' }
+]
+
+function generateZiweiDemo(data: any): ZiweiPalace[] {
+  // 简易演示：根据日支索引旋转主星落宫，非严谨排盘，仅用于 UI 演示
+  const branches = ['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥']
+  const idx = Math.max(0, branches.indexOf(data?.day?.earthlyBranch))
+  const rotate = <T,>(arr: T[], k: number) => arr.map((_,i)=> arr[(i+k)%arr.length])
+  const mainStars = rotate(['紫微','天机','太阳','武曲','天同','廉贞','天府','太阴','贪狼','巨门','天相','天梁'], idx)
+  const assists = ['左辅','右弼','文昌','文曲','天魁','天钺']
+  const transforms = ['化禄','化权','化科','化忌']
+  return ZW_PALACE_ORDER.map((p,i)=> ({
+    key: p.key,
+    name: p.name,
+    stars: [
+      { name: mainStars[i], type: 'main' as const },
+      { name: assists[i%assists.length], type: 'assist' as const },
+      { name: transforms[i%transforms.length], type: 'transform' as const }
+    ]
+  }))
+}
+
 function useEchart(option: any) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!ref.current) return
-    const chart = echarts.init(ref.current)
-    chart.setOption(option)
-    const onResize = () => chart.resize()
+    let disposed = false
+    let inMain = false
+    const ensureInit = () => {
+      if (!ref.current || disposed) return
+      const el = ref.current as HTMLDivElement
+      const style = window.getComputedStyle(el)
+      const hidden = style.display === 'none' || el.clientWidth === 0 || el.clientHeight === 0
+      if (hidden) { requestAnimationFrame(ensureInit); return }
+      inMain = true
+      const c = echarts.getInstanceByDom(el) || echarts.init(el)
+      c.setOption(option)
+      inMain = false
+    }
+    ensureInit()
+    const onResize = () => {
+      const el = ref.current as HTMLDivElement | null
+      if (!el) return
+      const c = echarts.getInstanceByDom(el)
+      if (c) { if (inMain) { setTimeout(() => c.resize(), 0) } else { requestAnimationFrame(() => c.resize()) } }
+    }
     window.addEventListener('resize', onResize)
     // Observe container size changes to keep chart centered when sibling cards change height
     let ro: any = null
     try {
       const R = (window as any).ResizeObserver
       if (R && ref.current) {
-        ro = new R(() => { chart.resize() })
+        ro = new R(() => { const el = ref.current as HTMLDivElement | null; if (!el) return; const c = echarts.getInstanceByDom(el); if (c) { if (inMain) { setTimeout(() => c.resize(), 0) } else { requestAnimationFrame(() => c.resize()) } } })
         ro.observe(ref.current)
       }
     } catch {}
-    return () => { if (ro && ro.disconnect) ro.disconnect(); window.removeEventListener('resize', onResize); chart.dispose() }
+    return () => { disposed = true; if (ro && ro.disconnect) ro.disconnect(); window.removeEventListener('resize', onResize); const el = ref.current as HTMLDivElement | null; if (el) { const c = echarts.getInstanceByDom(el); if (c) c.dispose() } }
   }, [JSON.stringify(option)])
   return ref
 }
@@ -278,6 +333,19 @@ function useEdgeAwareTooltips() {
 
 export function App() {
   const [form, setForm] = useState({ datetime: new Date().toISOString().slice(0,16), timezone: 'Asia/Shanghai', gender: 'male', useTrueSolarTime: false as boolean, lat: '' as string, lon: '' as string })
+  const [gregDate, setGregDate] = useState<Date>(new Date())
+  const [lunarDerivedISO, setLunarDerivedISO] = useState<string>('')
+  const [calendar, setCalendar] = useState<'gregorian'|'lunar'>('gregorian')
+  const [lunar, setLunar] = useState<{ year: string; month: string; day: string; isLeap: boolean; hour: string; minute: string }>({ year: String(new Date().getFullYear()), month: '1', day: '1', isLeap: false, hour: '0', minute: '0' })
+  const [showTzMap, setShowTzMap] = useState(false)
+  const [showCoordMap, setShowCoordMap] = useState(false)
+  const [showLunarQuick, setShowLunarQuick] = useState(false)
+  const tzMapRef = useRef<HTMLDivElement>(null)
+  const coordMapRef = useRef<HTMLDivElement>(null)
+  const tzLeaflet = useRef<L.Map | null>(null)
+  const coordLeaflet = useRef<L.Map | null>(null)
+  const [tzCandidate, setTzCandidate] = useState<string>('')
+  const [coordCandidate, setCoordCandidate] = useState<{ lat:number; lon:number } | null>(null)
   const [data, setData] = useState<CalcResp | null>(null)
   const [lang, setLang] = useState<'zh'|'en'>('zh')
   const [loading, setLoading] = useState(false)
@@ -285,22 +353,28 @@ export function App() {
   const [profiles, setProfiles] = useState<Profile[]>(() => {
     try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]') } catch { return [] }
   })
-  const [isDark, setIsDark] = useState<boolean>(true)
-  const [graphTab, setGraphTab] = useState<'stem'|'branch'|'palace'|'kin'>('stem')
+  const [isDark, setIsDark] = useState<boolean>(false)
+  const [graphTab, setGraphTab] = useState<'stem'|'branch'|'palace'|'kin'|'ziwei'>('stem')
+  const [zwFocus, setZwFocus] = useState<number | null>(null)
+  const [zwTransitTab, setZwTransitTab] = useState<'natal'|'year'|'month'|'day'>('natal')
+  const [zwTransitDate, setZwTransitDate] = useState<string>(()=> new Date().toISOString().slice(0,16))
+  const [zwTransit, setZwTransit] = useState<any|null>(null)
   useEdgeAwareTooltips()
 
   const dict = useMemo(() => ({
     zh: {
       title: '八字命理', input: '输入生辰', datetime: '日期时间', timezone: '时区', gender: '性别', male: '男', female: '女',
       submit: '排盘', calculating: '计算中…', five: '五行能量', chart_months: '流月', bazi: '命盘',
-      export: '导出PDF', daymaster: '日主', strength: '强弱', favorable: '喜用', avoid: '忌讳', notes: '说明', history: '历史记录', save: '保存', theme: '主题', light: '明', dark: '暗',
-      trueSolar: '真太阳时', latitude: '纬度', longitude: '经度'
+      export: '导出PDF', daymaster: '日主', strength: '强弱', favorable: '喜用', avoid: '忌讳', notes: '说明', history: '历史记录', save: '保存', theme: '主题', light: '阳', dark: '阴',
+      trueSolar: '真太阳时', latitude: '纬度', longitude: '经度',
+      calendar: '历法', gregorian: '公历', lunar: '农历', leapMonth: '闰月', tzPickOnMap: '地图选择', coordPickOnMap: '地图选点'
     },
     en: {
       title: 'BaZi Analyzer', input: 'Birth Input', datetime: 'Datetime', timezone: 'Timezone', gender: 'Gender', male: 'Male', female: 'Female',
       submit: 'Calculate', calculating: 'Calculating…', five: 'Five Elements', chart_months: 'Months (This Year)', bazi: 'BaZi Board',
       export: 'Export PDF', daymaster: 'Day Master', strength: 'Strength', favorable: 'Favorable', avoid: 'Avoid', notes: 'Notes', history: 'History', save: 'Save', theme: 'Theme', light: 'Light', dark: 'Dark',
-      trueSolar: 'True Solar Time', latitude: 'Latitude', longitude: 'Longitude'
+      trueSolar: 'True Solar Time', latitude: 'Latitude', longitude: 'Longitude',
+      calendar: 'Calendar', gregorian: 'Gregorian', lunar: 'Lunar', leapMonth: 'Leap', tzPickOnMap: 'Pick on map', coordPickOnMap: 'Pick on map'
     }
   }), [])
   const t = (k: keyof typeof dict['zh']) => (dict as any)[lang][k] || k
@@ -309,6 +383,67 @@ export function App() {
     const root = document.documentElement
     if (isDark) root.classList.add('dark'); else root.classList.remove('dark')
   }, [isDark])
+
+  // -------- Leaflet maps --------
+  useEffect(() => {
+    if (!showTzMap) return
+    const host = tzMapRef.current
+    if (!host) return
+    if (tzLeaflet.current) {
+      tzLeaflet.current.invalidateSize();
+      return
+    }
+    const map = L.map(host, { worldCopyJump: true, zoomControl: true, attributionControl: true }).setView([20, 0], 2)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map)
+    map.on('click', (e: any) => {
+      try {
+        const z = tzLookup ? tzLookup(e.latlng.lat, e.latlng.lng) : null
+        if (z) setTzCandidate(z)
+        else {
+          // Fallback: round to 15-degree offset
+          const raw = Math.round(e.latlng.lng / 15)
+          const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || (raw>=0?`Etc/GMT-${raw}`:`Etc/GMT+${Math.abs(raw)}`)
+          setTzCandidate(tzName)
+        }
+      } catch {
+        const raw = Math.round(e.latlng.lng / 15)
+        const tzName = raw>=0?`Etc/GMT-${raw}`:`Etc/GMT+${Math.abs(raw)}`
+        setTzCandidate(tzName)
+      }
+    })
+    tzLeaflet.current = map
+    setTimeout(()=> map.invalidateSize(), 100)
+    return () => {}
+  }, [showTzMap])
+
+  useEffect(() => {
+    if (!showCoordMap) return
+    const host = coordMapRef.current
+    if (!host) return
+    if (coordLeaflet.current) {
+      coordLeaflet.current.invalidateSize();
+      return
+    }
+    const map = L.map(host, { worldCopyJump: true, zoomControl: true, attributionControl: true }).setView([20, 0], 2)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map)
+    let marker: L.Marker<any> | null = null
+    map.on('click', (e: any) => {
+      const lat = Number(e.latlng.lat.toFixed(6))
+      const lon = Number(e.latlng.lng.toFixed(6))
+      setCoordCandidate({ lat, lon })
+      if (marker) marker.remove()
+      marker = L.marker([lat, lon]).addTo(map)
+    })
+    coordLeaflet.current = map
+    setTimeout(()=> map.invalidateSize(), 100)
+    return () => {}
+  }, [showCoordMap])
 
   const radarOption = useMemo(() => ({
     backgroundColor: 'transparent',
@@ -371,7 +506,7 @@ export function App() {
           { name: '金 (肃杀)', max: 10 },
           { name: '水 (润下)', max: 10 }
         ],
-        name: { color: textColor },
+        axisName: { color: textColor },
         axisLine: { lineStyle: { color: gridColor } },
         splitLine: { lineStyle: { color: [gridColor] } },
         splitArea: { areaStyle: { color: ['transparent', isDarkTheme?'rgba(212,175,55,0.06)':'rgba(184,134,11,0.06)'] } }
@@ -744,13 +879,7 @@ export function App() {
           return lines.join('')
         }
       },
-      legend: {
-        bottom: 4,
-        left: 'center',
-        itemGap: 12,
-        textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 11 },
-        data: children.map((c:any)=> c.name)
-      },
+      legend: { show: false },
       series: [{
         type: 'sunburst',
         radius: ['28%','84%'],
@@ -871,13 +1000,7 @@ export function App() {
           return ''
         }
       },
-      legend: {
-        top: 2,
-        right: 6,
-        itemGap: 10,
-        textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 11 },
-        data: Object.keys(buckets)
-      },
+      legend: { show: false },
       series: [{
         type: 'sankey',
         left: 28, right: 76, top: 12, bottom: 12,
@@ -897,6 +1020,185 @@ export function App() {
   }, [data])
   const kinGraphRef = useEchart(kinGraphOption)
 
+  // 紫微命盘（标准12宫布局）- 使用 ECharts Custom Series 绘制高质感栅格
+  const ziweiOption = useMemo(() => {
+    if (!data) return { series: [] }
+    const isDark = document.documentElement.classList.contains('dark')
+    const natalPalaces = (data as any).ziwei?.palaces
+    const transitPalaces = (zwTransit as any)?.palaces
+    const normalize = (arr:any) => (Array.isArray(arr) && arr.length>0
+      ? arr.map((p:any)=> ({ key:String(p?.key||''), name:String(p?.name||''), branch:String(p?.branch||''), stars: Array.isArray(p?.stars)?p.stars:[] }))
+      : null)
+    const basePalaces = normalize(natalPalaces) || []
+    const overlayPalaces = zwTransitTab!=='natal' ? normalize(transitPalaces) : null
+    const palaceData = basePalaces
+    const palaceNames = Array.isArray(basePalaces)
+      ? basePalaces.map((p:any)=> String(p?.name || ''))
+      : []
+    // 4x4 外环布局（中间2x2留白）- 顺时针从左上开始
+    const layout = [
+      { r:0, c:0 },{ r:0, c:1 },{ r:0, c:2 },{ r:0, c:3 },
+      { r:1, c:3 },{ r:2, c:3 },
+      { r:3, c:3 },{ r:3, c:2 },{ r:3, c:1 },{ r:3, c:0 },
+      { r:2, c:0 },{ r:1, c:0 }
+    ]
+    const cell = { w: 1/4, h: 1/4 }
+    // 直接基于 isDark 映射主题色，确保切换时立即生效
+    const bg = isDark ? '#0e131a' : '#ffffff'
+    // 明色主题采用与全局风格契合的金色边框
+    const border = isDark ? 'rgba(212,175,55,0.35)' : 'rgba(184,134,11,0.45)'
+    const titleColor = isDark ? '#e5e7eb' : '#0f172a'
+    const subColor = isDark ? 'rgba(148,163,184,0.9)' : 'rgba(71,85,105,0.9)'
+    const colorOfType: Record<ZiweiStarType,string> = {
+      main: '#ffd166',
+      assist: '#a3e635',
+      transform: '#60a5fa',
+      misc: isDark ? '#cbd5e1' : '#475569'
+    }
+    const series: any = {
+      type: 'custom',
+      coordinateSystem: 'none',
+      renderItem: (_params: any, api: any) => {
+        let idx = Number(api.value(0))
+        if (!Number.isFinite(idx)) idx = 0
+        const rc = layout[idx]
+        if (!rc) return { type: 'group', children: [] } as any
+        const W = api.getWidth(); const H = api.getHeight()
+        // 将单元间距平均分配到左右/上下，避免右下角被裁切
+        const pad = Math.min(W, H) * 0.02
+        const cw = W * cell.w; const ch = H * cell.h
+        const x = rc.c * cw + pad * 0.5
+        const y = rc.r * ch + pad * 0.5
+        const w = cw - pad; const h = ch - pad
+        const name = (palaceNames && palaceNames[idx]) ? palaceNames[idx] : ''
+        const palObj = (Array.isArray(basePalaces) && (basePalaces as any)[idx]) ? (basePalaces as any)[idx] : null
+        const branch = palObj?.branch ? String(palObj.branch) : ''
+        const starsAtPal: { name:string; type: ZiweiStarType }[] = Array.isArray(palObj?.stars) ? palObj.stars : []
+        const isShen = Array.isArray(starsAtPal) && starsAtPal.some((s:any)=> String(s?.name)==='身宫')
+        const title = `${name}${branch ? `（${branch}${isShen?'·身':''}）` : (isShen ? '（身）' : '')}`
+        const focus = typeof zwFocus === 'number' ? zwFocus : null
+        const tri = Array.isArray((data as any).ziwei?.meta?.triSquares) ? (data as any).ziwei.meta.triSquares : null
+        const setOf = (i:number) => new Set(Array.isArray(tri) && Array.isArray(tri[i]) ? tri[i] : [i, (i+4)%12, (i+8)%12, (i+6)%12])
+        const highlight = focus!=null ? setOf(focus) : null
+        const isInFocus = focus!=null && highlight?.has(idx)
+        const group:any = {
+          type: 'group',
+          // 裁剪到宫位矩形，避免任何内容溢出
+          clipPath: { type: 'rect', shape: { x, y, width: w, height: h, r: 12 } },
+          children: [
+            { // 背板（可点击以触发高亮）
+              type: 'rect', shape: { x, y, width: w, height: h, r: 12 },
+              style: { fill: bg, stroke: border, lineWidth: isDark ? 1 : 0.9, cursor: 'pointer' },
+              silent: false
+            },
+            ...(isInFocus ? [{ type:'rect', shape:{ x:x+3, y:y+3, width:w-6, height:h-6, r:12 }, style:{ stroke:'#d4af37', lineWidth:2, fill:'transparent' }, silent:true }] : []),
+            { // 宫名（含地支与身宫标记）
+              type: 'text', style: { x: x+12, y: y+10, text: title, fill: titleColor, font: '600 13px "Noto Sans SC", system-ui' }
+            },
+            ...((): any[] => {
+              const safePal = Array.isArray(basePalaces) && basePalaces[idx] ? basePalaces[idx] : { stars: [] }
+              const stars: { name: string; type: ZiweiStarType }[] = Array.isArray((safePal as any)?.stars) ? (safePal as any).stars : []
+              const rows = Math.max(1, Math.ceil(stars.length / 2))
+              const availableTextHeight = Math.max(0, h - 38)
+              const lineH = Math.max(14, Math.min(18, availableTextHeight / rows))
+              const fsMain = Math.max(12, Math.min(14, lineH - 2))
+              const fsMinor = Math.max(11, Math.min(13, lineH - 3))
+              const baseY = y + 32
+              return stars.map((s: { name:string; type: ZiweiStarType }, si: number) => ({
+                type: 'text',
+                style: {
+                  x: x + 12 + (si%2)* (w/2),
+                  y: baseY + Math.floor(si/2)*lineH,
+                  text: String(s?.name || ''),
+                  fill: colorOfType[s.type as ZiweiStarType],
+                  font: s.type==='main' ? `600 ${fsMain}px "Noto Sans SC", system-ui` : `${fsMinor}px "Noto Sans SC", system-ui`
+                }
+              }))
+            })()
+            ,...((): any[] => {
+              if (!Array.isArray(overlayPalaces)) return []
+              const pal = (overlayPalaces as any)[idx]
+              const list: { name:string; type: ZiweiStarType }[] = Array.isArray(pal?.stars) ? pal.stars : []
+              const rows = Math.max(1, Math.ceil(list.length / 2))
+              const availableTextHeight = Math.max(0, h - 38)
+              const lineH = Math.max(14, Math.min(18, availableTextHeight / rows))
+              const fsMain = Math.max(11, Math.min(13, lineH - 3))
+              const fsMinor = Math.max(10, Math.min(12, lineH - 4))
+              const baseY = y + 32
+              return list.map((s: { name:string; type: ZiweiStarType }, si: number) => ({
+                type: 'text',
+                style: {
+                  x: x + 12 + (si%2)* (w/2),
+                  y: baseY + Math.floor(si/2)*lineH,
+                  text: '· ' + String(s?.name || ''),
+                  fill: colorOfType[s.type as ZiweiStarType],
+                  opacity: 0.65,
+                  font: s.type==='main' ? `500 ${fsMain}px "Noto Sans SC", system-ui` : `${fsMinor}px "Noto Sans SC", system-ui`
+                }
+              }))
+            })()
+          ]
+        }
+        return group
+      },
+      data: (Array.isArray(palaceData) && palaceData.length===12)
+        ? Array.from({ length: 12 }, (_:unknown, i:number)=> [i])
+        : []
+    }
+    return {
+      backgroundColor: 'transparent',
+      animation: false,
+      // 明确指定无坐标系
+      coordinateSystem: 'none',
+      tooltip: {
+        show: true,
+        backgroundColor: isDark ? 'rgba(14,19,26,0.95)' : 'rgba(255,255,255,0.95)',
+        borderColor: isDark ? 'rgba(212,175,55,0.2)' : 'rgba(212,175,55,0.3)',
+        borderWidth: 1,
+        textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 12 },
+        formatter: (p:any) => {
+          const raw = Array.isArray(p?.data) ? p.data : []
+          const idx = typeof raw[0] === 'number' ? raw[0] : 0
+          const pal = (Array.isArray(basePalaces) && basePalaces[idx]) ? (basePalaces as any)[idx] : { name:'', stars:[] }
+          const list = Array.isArray((pal as any).stars) ? (pal as any).stars : []
+          const chips = list.map((s:any) => {
+            const c = colorOfType[(s?.type || 'misc') as ZiweiStarType]
+            const n = String(s?.name || '')
+            return `<span style=\"display:inline-flex;align-items:center;margin-right:6px;color:${c}\">●</span>${n}`
+          }).filter(Boolean).join('、')
+          if (Array.isArray(overlayPalaces)) {
+            const pal2 = (overlayPalaces as any)[idx] || { stars: [] }
+            const list2 = Array.isArray(pal2?.stars) ? pal2.stars : []
+            const chips2 = list2.map((s:any) => String(s?.name||'')).filter(Boolean).join('、')
+            const tag = `<span class=\"chip\" style=\"margin-left:6px\">${zwTransitTab==='year'?'流年':zwTransitTab==='month'?'流月':zwTransitTab==='day'?'流日':'本命'}<\/span>`
+            return `<div style=\"font-weight:600;color:var(--gold)\">${pal.name || ''}</div>`+
+                   `<div style=\"margin-top:4px;color:${subColor}\">${chips || '—'}${tag}</div>`+
+                   (chips2?`<div style=\"margin-top:2px;opacity:.75\">流：${chips2}</div>`:'')
+          }
+          return `<div style=\"font-weight:600;color:var(--gold)\">${pal.name || ''}</div>`+
+                 `<div style=\"margin-top:4px;color:${subColor}\">${chips || '—'}</div>`
+        }
+      },
+      series: [series]
+    }
+  }, [data, zwFocus, isDark, zwTransit, zwTransitTab])
+  const ziweiRef = useEchart(ziweiOption)
+
+  // 点击高亮三方四正
+  useEffect(() => {
+    const el = (ziweiRef as any)?.current as HTMLDivElement | null
+    if (!el) return
+    const chart = echarts.getInstanceByDom(el)
+    if (!chart) return
+    const handler = (ev: any) => {
+      if (Array.isArray(ev?.data) && typeof ev.data[0] === 'number') {
+        setZwFocus((prev) => prev === ev.data[0] ? null : ev.data[0])
+      }
+    }
+    chart.on('click', handler)
+    return () => { chart.off('click', handler) }
+  }, [ziweiRef])
+
   // 当图谱 Tab 切换时，强制触发对应 ECharts 实例 resize，保证在隐藏->显示后仍然正确居中
   useEffect(() => {
     const tryResize = (refAny: any) => {
@@ -909,6 +1211,7 @@ export function App() {
     if (graphTab === 'branch') tryResize(branchGraphRef)
     if (graphTab === 'palace') tryResize(palaceGraphRef)
     if (graphTab === 'kin') tryResize(kinGraphRef)
+    if (graphTab === 'ziwei') tryResize(ziweiRef)
   }, [graphTab])
 
   const [timeline, setTimeline] = useState<{ month:number; pillar:string }[] | null>(null)
@@ -923,22 +1226,84 @@ export function App() {
     axios.get(base + '/api/timeline/' + y).then(r=> setTimeline(r.data.months)).catch(()=>{})
   },[])
 
+  async function loadZiweiTransit() {
+    try {
+      const base = getApiBase()
+      const payload: any = {
+        datetime: new Date(zwTransitDate).toISOString(),
+        timezone: form.timezone
+      }
+      const resp = await axios.post(base + '/api/ziwei/transit', payload)
+      setZwTransit(resp.data?.base || null)
+    } catch (_) {
+      setZwTransit(null)
+    }
+  }
+
+  // 当切换到紫微 + 选择流年/月/日时自动加载
+  useEffect(() => {
+    if (graphTab === 'ziwei' && zwTransitTab !== 'natal') {
+      loadZiweiTransit()
+    }
+  }, [graphTab, zwTransitTab, zwTransitDate, form.timezone])
+
+  // URL 查询参数同步（zt: natal/year/month/day, zd: datetime-local）
+  useEffect(() => {
+    try {
+      const qs = new URLSearchParams(window.location.search)
+      const zt = qs.get('zt')
+      const zd = qs.get('zd')
+      if (zt && ['natal','year','month','day'].includes(zt)) {
+        setZwTransitTab(zt as any)
+      }
+      if (zd) {
+        setZwTransitDate(zd)
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href)
+      const qs = url.searchParams
+      qs.set('zt', zwTransitTab)
+      qs.set('zd', zwTransitDate)
+      window.history.replaceState({}, '', `${url.pathname}?${qs.toString()}`)
+    } catch {}
+  }, [zwTransitTab, zwTransitDate])
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     setLoading(true)
     try {
+      let iso = new Date(form.datetime).toISOString()
+      if (calendar === 'lunar') {
+        const base = getApiBase()
+        const y = parseInt(lunar.year, 10), m = parseInt(lunar.month, 10), d = parseInt(lunar.day, 10)
+        const hh = parseInt(lunar.hour || '0', 10) || 0
+        const mm = parseInt(lunar.minute || '0', 10) || 0
+        if (!y || !m || !d) throw new Error('请输入有效的农历年月日')
+        const resp = await axios.post(base + '/api/convert-lunar', { lunar: { year: y, month: m, day: d, isLeap: !!lunar.isLeap, hour: hh, minute: mm, second: 0 }, timezone: form.timezone })
+        iso = resp.data?.iso || iso
+      }
       const payload: any = {
-        datetime: new Date(form.datetime).toISOString(),
+        datetime: iso,
         timezone: form.timezone,
-        gender: form.gender
+        gender: form.gender,
+        useTrueSolarTime: form.useTrueSolarTime || undefined
       }
       if (form.useTrueSolarTime) {
         const lat = parseFloat(form.lat)
         const lon = parseFloat(form.lon)
-        if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+        const latOk = !Number.isNaN(lat) && lat >= -90 && lat <= 90
+        const lonOk = !Number.isNaN(lon) && lon >= -180 && lon <= 180
+        if (latOk && lonOk) {
           payload.useTrueSolarTime = true
           payload.location = { lat, lon }
+        } else {
+          throw new Error('真太阳时开启时，请输入有效经纬度（纬度 -90~90， 经度 -180~180）')
         }
       }
       const base = getApiBase()
@@ -1005,16 +1370,113 @@ export function App() {
           <h2 className="mb-3 text-sm text-gray-300">{t('input')}</h2>
           <form className="space-y-3" onSubmit={onSubmit}>
             {error && <div className="alert alert-error">{error}</div>}
+            <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="block text-xs muted mb-1">{t('datetime')}</label>
-              <input className="w-full input" type="datetime-local" value={form.datetime}
-                onChange={e=>setForm(prev=>({ ...prev, datetime: e.target.value }))} />
+                <label className="block text-xs muted mb-1">{t('calendar')}</label>
+                <select className="w-full select" value={calendar} onChange={e=>setCalendar(e.target.value as any)}>
+                  <option value="gregorian">{t('gregorian')}</option>
+                  <option value="lunar">{t('lunar')}</option>
+                </select>
             </div>
             <div>
               <label className="block text-xs muted mb-1">{t('timezone')}</label>
-              <input className="w-full input" placeholder="Asia/Shanghai" value={form.timezone}
-                onChange={e=>setForm(prev=>({ ...prev, timezone: e.target.value }))} />
+                <div className="flex gap-2">
+                  <input className="w-full input tz-input" placeholder="Asia/Shanghai" value={form.timezone}
+                    onChange={e=>setForm(prev=>({ ...prev, timezone: e.target.value }))} onClick={()=>setShowTzMap(true)} readOnly />
+                  <button type="button" className="btn text-xs" onClick={()=>setShowTzMap(true)}>{t('tzPickOnMap')}</button>
+                </div>
+              </div>
             </div>
+            <div>
+              <label className="block text-xs muted mb-1">{t('datetime')}</label>
+              <div className="input-group">
+                <span className="icon">📅</span>
+                {(() => {
+                  const LunarInput = forwardRef<HTMLInputElement, any>(({ value, onClick }, ref) => (
+                    <input ref={ref} onClick={onClick} readOnly className="w-full input date-input" value={value || ''} placeholder="选择日期" />
+                  ))
+                  const commonProps = {
+                    showTimeSelect: true,
+                    timeIntervals: 15,
+                    dateFormat: 'yyyy-MM-dd HH:mm',
+                    calendarStartDay: 1 as const,
+                    showMonthDropdown: true,
+                    showYearDropdown: true,
+                    dropdownMode: 'select' as const
+                  }
+                  if (calendar === 'gregorian') {
+                    return (
+                      <DatePicker
+                        selected={gregDate}
+                        onChange={(d: Date|null) => {
+                          const val = d || new Date()
+                          setGregDate(val)
+                          const local = new Date(val.getTime() - val.getTimezoneOffset() * 60000).toISOString().slice(0,16)
+                          setForm(prev=>({ ...prev, datetime: local }))
+                        }}
+                        className="w-full input date-input"
+                        {...commonProps}
+                      />
+                    )
+                  }
+                  // lunar mode — use the same picker UI for quick month/year switch, but interpret the picked Y/M/D/H/m as LUNAR values
+                  const display = `农历 ${lunar.year}-${lunar.month}-${lunar.day}${lunar.isLeap?'(闰)':''} ${String(lunar.hour).padStart(2,'0')}:${String(lunar.minute).padStart(2,'0')}`
+                  return (
+                    <DatePicker
+                      selected={gregDate}
+                      onChange={async (d: Date|null) => {
+                        const val = d || new Date()
+                        setGregDate(val)
+                        // Interpret picker selection as lunar Y/M/D/H/m directly
+                        const ly = val.getFullYear()
+                        const lm = val.getMonth() + 1
+                        const ld = val.getDate()
+                        const hh = val.getHours()
+                        const mm = val.getMinutes()
+                        setLunar({ year: String(ly), month: String(lm), day: String(ld), isLeap: Boolean(lunar.isLeap), hour: String(hh), minute: String(mm) })
+                        try {
+                          const base = getApiBase()
+                          const rr = await axios.post(base + '/api/convert-lunar', { lunar: { year: ly, month: lm, day: ld, isLeap: Boolean(lunar.isLeap), hour: hh, minute: mm, second: 0 }, timezone: form.timezone })
+                          const iso = String(rr.data?.iso || '')
+                          if (iso) {
+                            setLunarDerivedISO(iso)
+                            setForm(prev=>({ ...prev, datetime: iso.slice(0,16) }))
+                          }
+                        } catch {}
+                      }}
+                      customInput={<LunarInput value={display} />}
+                      {...commonProps}
+                    />
+                  )
+                })()}
+              </div>
+              {calendar === 'lunar' && (
+                <div className="mt-2 flex items-center gap-3">
+                  <div className="text-[11px] muted">对应公历：{lunarDerivedISO ? new Date(lunarDerivedISO).toLocaleString() : '—'}</div>
+                  <label className="text-[11px] muted flex items-center gap-1">
+                    <input type="checkbox" className="h-4 w-4" checked={lunar.isLeap} onChange={async (e)=>{
+                      const isLeap = e.target.checked
+                      const ly = parseInt(lunar.year, 10) || new Date().getFullYear()
+                      const lm = parseInt(lunar.month, 10) || 1
+                      const ld = parseInt(lunar.day, 10) || 1
+                      const hh = parseInt(lunar.hour||'0', 10) || 0
+                      const mm = parseInt(lunar.minute||'0', 10) || 0
+                      setLunar(p=>({ ...p, isLeap }))
+                      try {
+                        const base = getApiBase()
+                        const rr = await axios.post(base + '/api/convert-lunar', { lunar: { year: ly, month: lm, day: ld, isLeap, hour: hh, minute: mm, second: 0 }, timezone: form.timezone })
+                        const iso = String(rr.data?.iso || '')
+                        if (iso) {
+                          setLunarDerivedISO(iso)
+                          setForm(prev=>({ ...prev, datetime: iso.slice(0,16) }))
+                        }
+                      } catch {}
+                    }} /> 闰月
+                  </label>
+                </div>
+              )}
+            </div>
+            {/* 农历模式不再展示自定义面板，统一使用上方日期控件并在提交时转换 */}
             <div className="flex items-center gap-2">
               <input id="trueSolar" type="checkbox" className="h-4 w-4" checked={form.useTrueSolarTime}
                 onChange={e=>setForm(prev=>({ ...prev, useTrueSolarTime: e.target.checked }))} />
@@ -1023,8 +1485,11 @@ export function App() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-xs muted mb-1">{t('latitude')}</label>
+                <div className="flex gap-2">
                 <input className="w-full input" placeholder="31.23" value={form.lat}
                   onChange={e=>setForm(prev=>({ ...prev, lat: e.target.value }))} disabled={!form.useTrueSolarTime} />
+                  <button type="button" className="btn text-xs" onClick={()=> setShowCoordMap(true)} disabled={!form.useTrueSolarTime}>{t('coordPickOnMap')}</button>
+                </div>
               </div>
               <div>
                 <label className="block text-xs muted mb-1">{t('longitude')}</label>
@@ -1050,6 +1515,52 @@ export function App() {
               }} className="btn text-xs mt-2">{t('save')}</button>
             </div>
           </form>
+          {/* Timezone map modal */}
+          {showTzMap && (
+            <div className="modal-backdrop" onClick={()=>setShowTzMap(false)}>
+              <div className="modal" onClick={e=>e.stopPropagation()}>
+                <div className="modal-header">
+                  <div className="text-sm">{t('timezone')} / {t('tzPickOnMap')}</div>
+                  <button className="btn text-xs" onClick={()=>setShowTzMap(false)}>✕</button>
+                </div>
+                <div className="modal-body">
+                  <div ref={tzMapRef} style={{ width:'100%', height: 320, borderRadius: 8 }} />
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="text-xs">{tzCandidate ? `已选择：${tzCandidate}` : '点击地图选择时区（按经度近似）'}</div>
+                    <div className="flex gap-2">
+                      <button className="btn text-xs" onClick={()=> setTzCandidate(Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai')}>使用本机</button>
+                      <button className="btn btn-primary text-xs" disabled={!tzCandidate} onClick={()=> { if (tzCandidate) { setForm(p=>({ ...p, timezone: tzCandidate })); setShowTzMap(false); } }}>应用</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Coordinate pick modal */}
+          {showCoordMap && (
+            <div className="modal-backdrop" onClick={()=>setShowCoordMap(false)}>
+              <div className="modal" onClick={e=>e.stopPropagation()}>
+                <div className="modal-header">
+                  <div className="text-sm">{t('coordPickOnMap')}</div>
+                  <button className="btn text-xs" onClick={()=>setShowCoordMap(false)}>✕</button>
+                </div>
+                <div className="modal-body">
+                  <div ref={coordMapRef} style={{ width:'100%', height: 360, borderRadius: 8 }} />
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="text-xs">{coordCandidate ? `坐标：${coordCandidate.lat}, ${coordCandidate.lon}` : '点击世界地图设置经纬度（等矩形近似）'}</div>
+                    <div className="flex gap-2">
+                      <button className="btn btn-primary text-xs" disabled={!coordCandidate} onClick={()=> {
+                        if (coordCandidate) {
+                          setForm(p=>({ ...p, lat: String(coordCandidate.lat), lon: String(coordCandidate.lon) }));
+                          setShowCoordMap(false)
+                        }
+                      }}>应用</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {profiles.length > 0 && (
             <div className="mt-4">
               <div className="flex items-center justify-between mb-2">
@@ -1425,7 +1936,7 @@ export function App() {
             {(data.graph || data.branchGraph) && (
               <div className="p-4 rounded-card bg-[var(--card)] border border-[var(--border)] md:col-span-2">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="text-xs muted tooltip">干支智能图谱
+                  <div className="text-xs muted tooltip">智能图谱
                     <div className="tooltip-content">
                       <div>四柱干支关系图，显示生克合冲等关系</div>
                       <div className="mt-1">关系强弱影响命局平衡与格局高低</div>
@@ -1456,9 +1967,31 @@ export function App() {
                     >
                       六亲
                     </button>
+                    <button 
+                      onClick={() => setGraphTab('ziwei')}
+                      className={`text-xs px-2 py-1 rounded ${graphTab==='ziwei' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`}
+                    >
+                      紫微
+                    </button>
                   </div>
                 </div>
-                <div className="w-full" style={{ minHeight: 320, display: 'grid', placeItems: 'center' }}>
+                  <div className="w-full" style={{ minHeight: 320, display: 'grid', placeItems: 'center' }}>
+                    {graphTab==='ziwei' && (
+                      <div className="flex items-center justify-between w-full max-w-[640px] mb-2">
+                        <div className="flex items-center gap-2">
+                          <button onClick={()=>setZwTransitTab('natal')} className={`text-xs px-2 py-1 rounded ${zwTransitTab==='natal'?'bg-gold text-black':'text-muted hover:text-fg'}`}>本命</button>
+                          <button onClick={()=>setZwTransitTab('year')} className={`text-xs px-2 py-1 rounded ${zwTransitTab==='year'?'bg-gold text-black':'text-muted hover:text-fg'}`}>流年</button>
+                          <button onClick={()=>setZwTransitTab('month')} className={`text-xs px-2 py-1 rounded ${zwTransitTab==='month'?'bg-gold text-black':'text-muted hover:text-fg'}`}>流月</button>
+                          <button onClick={()=>setZwTransitTab('day')} className={`text-xs px-2 py-1 rounded ${zwTransitTab==='day'?'bg-gold text-black':'text-muted hover:text-fg'}`}>流日</button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input type="datetime-local" value={zwTransitDate} onChange={e=>setZwTransitDate(e.target.value)} className="input text-xs" style={{ height: 28, paddingTop: 2, paddingBottom: 2 }} />
+                          {zwTransitTab!=='natal' && (
+                            <button onClick={loadZiweiTransit} className="btn text-xs">刷新</button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   <div style={{ width: '100%', height: 320, display: graphTab==='stem' ? 'block' : 'none' }}>
                     <div ref={graphRef as any} style={{ width: '100%', height: '100%' }} />
                   </div>
@@ -1471,6 +2004,9 @@ export function App() {
                   <div style={{ width: '100%', height: 320, display: graphTab==='kin' ? 'block' : 'none' }}>
                     <div ref={kinGraphRef as any} style={{ width: '100%', height: '100%' }} />
                   </div>
+                    <div style={{ width: '100%', maxWidth: 640, aspectRatio: '1 / 1', height: 'auto', display: graphTab==='ziwei' ? 'block' : 'none' }}>
+                      <div ref={ziweiRef as any} style={{ width: '100%', height: '100%' }} />
+                    </div>
                 </div>
                 <div className="text-[11px] muted mt-2">
                   {graphTab==='stem' ? (

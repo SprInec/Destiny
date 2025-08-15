@@ -2,9 +2,18 @@ import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 import { useMemo, useState } from 'react';
 import axios from 'axios';
 import * as echarts from 'echarts';
-import { useEffect, useRef } from 'react';
+// Leaflet is optional at type-level; import dynamically for runtime map rendering
+// @ts-ignore
+import 'leaflet/dist/leaflet.css';
+// @ts-ignore
+import L from 'leaflet';
+// @ts-ignore - optional runtime dependency for better tz pickup; fallback to offset method if missing
+import tzLookup from 'tz-lookup';
+import { useEffect, useRef, forwardRef } from 'react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import DatePicker from 'react-datepicker';
+import 'react-datepicker/dist/react-datepicker.css';
 const LS_KEY = 'destiny_profiles';
 const ELEMENT_CN = { wood: '木', fire: '火', earth: '土', metal: '金', water: '水' };
 const ELEMENT_COLOR = { wood: '#22c55e', fire: '#ef4444', earth: '#eab308', metal: '#f59e0b', water: '#3b82f6' };
@@ -227,27 +236,91 @@ function computeShenShaPositions(pillars, dayBranch) {
     });
     return results;
 }
+const ZW_PALACE_ORDER = [
+    { key: 'm', name: '命宫' }, { key: 'xb', name: '兄弟' }, { key: 'fp', name: '夫妻' }, { key: 'zn', name: '子女' },
+    { key: 'cb', name: '财帛' }, { key: 'je', name: '疾厄' }, { key: 'qy', name: '迁移' }, { key: 'py', name: '仆役' },
+    { key: 'gl', name: '官禄' }, { key: 'tz', name: '田宅' }, { key: 'fd', name: '福德' }, { key: 'fm', name: '父母' }
+];
+function generateZiweiDemo(data) {
+    // 简易演示：根据日支索引旋转主星落宫，非严谨排盘，仅用于 UI 演示
+    const branches = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
+    const idx = Math.max(0, branches.indexOf(data?.day?.earthlyBranch));
+    const rotate = (arr, k) => arr.map((_, i) => arr[(i + k) % arr.length]);
+    const mainStars = rotate(['紫微', '天机', '太阳', '武曲', '天同', '廉贞', '天府', '太阴', '贪狼', '巨门', '天相', '天梁'], idx);
+    const assists = ['左辅', '右弼', '文昌', '文曲', '天魁', '天钺'];
+    const transforms = ['化禄', '化权', '化科', '化忌'];
+    return ZW_PALACE_ORDER.map((p, i) => ({
+        key: p.key,
+        name: p.name,
+        stars: [
+            { name: mainStars[i], type: 'main' },
+            { name: assists[i % assists.length], type: 'assist' },
+            { name: transforms[i % transforms.length], type: 'transform' }
+        ]
+    }));
+}
 function useEchart(option) {
     const ref = useRef(null);
     useEffect(() => {
         if (!ref.current)
             return;
-        const chart = echarts.init(ref.current);
-        chart.setOption(option);
-        const onResize = () => chart.resize();
+        let disposed = false;
+        let inMain = false;
+        const ensureInit = () => {
+            if (!ref.current || disposed)
+                return;
+            const el = ref.current;
+            const style = window.getComputedStyle(el);
+            const hidden = style.display === 'none' || el.clientWidth === 0 || el.clientHeight === 0;
+            if (hidden) {
+                requestAnimationFrame(ensureInit);
+                return;
+            }
+            inMain = true;
+            const c = echarts.getInstanceByDom(el) || echarts.init(el);
+            c.setOption(option);
+            inMain = false;
+        };
+        ensureInit();
+        const onResize = () => {
+            const el = ref.current;
+            if (!el)
+                return;
+            const c = echarts.getInstanceByDom(el);
+            if (c) {
+                if (inMain) {
+                    setTimeout(() => c.resize(), 0);
+                }
+                else {
+                    requestAnimationFrame(() => c.resize());
+                }
+            }
+        };
         window.addEventListener('resize', onResize);
         // Observe container size changes to keep chart centered when sibling cards change height
         let ro = null;
         try {
             const R = window.ResizeObserver;
             if (R && ref.current) {
-                ro = new R(() => { chart.resize(); });
+                ro = new R(() => { const el = ref.current; if (!el)
+                    return; const c = echarts.getInstanceByDom(el); if (c) {
+                    if (inMain) {
+                        setTimeout(() => c.resize(), 0);
+                    }
+                    else {
+                        requestAnimationFrame(() => c.resize());
+                    }
+                } });
                 ro.observe(ref.current);
             }
         }
         catch { }
-        return () => { if (ro && ro.disconnect)
-            ro.disconnect(); window.removeEventListener('resize', onResize); chart.dispose(); };
+        return () => { disposed = true; if (ro && ro.disconnect)
+            ro.disconnect(); window.removeEventListener('resize', onResize); const el = ref.current; if (el) {
+            const c = echarts.getInstanceByDom(el);
+            if (c)
+                c.dispose();
+        } };
     }, [JSON.stringify(option)]);
     return ref;
 }
@@ -275,6 +348,19 @@ function useEdgeAwareTooltips() {
 }
 export function App() {
     const [form, setForm] = useState({ datetime: new Date().toISOString().slice(0, 16), timezone: 'Asia/Shanghai', gender: 'male', useTrueSolarTime: false, lat: '', lon: '' });
+    const [gregDate, setGregDate] = useState(new Date());
+    const [lunarDerivedISO, setLunarDerivedISO] = useState('');
+    const [calendar, setCalendar] = useState('gregorian');
+    const [lunar, setLunar] = useState({ year: String(new Date().getFullYear()), month: '1', day: '1', isLeap: false, hour: '0', minute: '0' });
+    const [showTzMap, setShowTzMap] = useState(false);
+    const [showCoordMap, setShowCoordMap] = useState(false);
+    const [showLunarQuick, setShowLunarQuick] = useState(false);
+    const tzMapRef = useRef(null);
+    const coordMapRef = useRef(null);
+    const tzLeaflet = useRef(null);
+    const coordLeaflet = useRef(null);
+    const [tzCandidate, setTzCandidate] = useState('');
+    const [coordCandidate, setCoordCandidate] = useState(null);
     const [data, setData] = useState(null);
     const [lang, setLang] = useState('zh');
     const [loading, setLoading] = useState(false);
@@ -287,21 +373,27 @@ export function App() {
             return [];
         }
     });
-    const [isDark, setIsDark] = useState(true);
+    const [isDark, setIsDark] = useState(false);
     const [graphTab, setGraphTab] = useState('stem');
+    const [zwFocus, setZwFocus] = useState(null);
+    const [zwTransitTab, setZwTransitTab] = useState('natal');
+    const [zwTransitDate, setZwTransitDate] = useState(() => new Date().toISOString().slice(0, 16));
+    const [zwTransit, setZwTransit] = useState(null);
     useEdgeAwareTooltips();
     const dict = useMemo(() => ({
         zh: {
             title: '八字命理', input: '输入生辰', datetime: '日期时间', timezone: '时区', gender: '性别', male: '男', female: '女',
             submit: '排盘', calculating: '计算中…', five: '五行能量', chart_months: '流月', bazi: '命盘',
-            export: '导出PDF', daymaster: '日主', strength: '强弱', favorable: '喜用', avoid: '忌讳', notes: '说明', history: '历史记录', save: '保存', theme: '主题', light: '明', dark: '暗',
-            trueSolar: '真太阳时', latitude: '纬度', longitude: '经度'
+            export: '导出PDF', daymaster: '日主', strength: '强弱', favorable: '喜用', avoid: '忌讳', notes: '说明', history: '历史记录', save: '保存', theme: '主题', light: '阳', dark: '阴',
+            trueSolar: '真太阳时', latitude: '纬度', longitude: '经度',
+            calendar: '历法', gregorian: '公历', lunar: '农历', leapMonth: '闰月', tzPickOnMap: '地图选择', coordPickOnMap: '地图选点'
         },
         en: {
             title: 'BaZi Analyzer', input: 'Birth Input', datetime: 'Datetime', timezone: 'Timezone', gender: 'Gender', male: 'Male', female: 'Female',
             submit: 'Calculate', calculating: 'Calculating…', five: 'Five Elements', chart_months: 'Months (This Year)', bazi: 'BaZi Board',
             export: 'Export PDF', daymaster: 'Day Master', strength: 'Strength', favorable: 'Favorable', avoid: 'Avoid', notes: 'Notes', history: 'History', save: 'Save', theme: 'Theme', light: 'Light', dark: 'Dark',
-            trueSolar: 'True Solar Time', latitude: 'Latitude', longitude: 'Longitude'
+            trueSolar: 'True Solar Time', latitude: 'Latitude', longitude: 'Longitude',
+            calendar: 'Calendar', gregorian: 'Gregorian', lunar: 'Lunar', leapMonth: 'Leap', tzPickOnMap: 'Pick on map', coordPickOnMap: 'Pick on map'
         }
     }), []);
     const t = (k) => dict[lang][k] || k;
@@ -312,6 +404,72 @@ export function App() {
         else
             root.classList.remove('dark');
     }, [isDark]);
+    // -------- Leaflet maps --------
+    useEffect(() => {
+        if (!showTzMap)
+            return;
+        const host = tzMapRef.current;
+        if (!host)
+            return;
+        if (tzLeaflet.current) {
+            tzLeaflet.current.invalidateSize();
+            return;
+        }
+        const map = L.map(host, { worldCopyJump: true, zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+        map.on('click', (e) => {
+            try {
+                const z = tzLookup ? tzLookup(e.latlng.lat, e.latlng.lng) : null;
+                if (z)
+                    setTzCandidate(z);
+                else {
+                    // Fallback: round to 15-degree offset
+                    const raw = Math.round(e.latlng.lng / 15);
+                    const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || (raw >= 0 ? `Etc/GMT-${raw}` : `Etc/GMT+${Math.abs(raw)}`);
+                    setTzCandidate(tzName);
+                }
+            }
+            catch {
+                const raw = Math.round(e.latlng.lng / 15);
+                const tzName = raw >= 0 ? `Etc/GMT-${raw}` : `Etc/GMT+${Math.abs(raw)}`;
+                setTzCandidate(tzName);
+            }
+        });
+        tzLeaflet.current = map;
+        setTimeout(() => map.invalidateSize(), 100);
+        return () => { };
+    }, [showTzMap]);
+    useEffect(() => {
+        if (!showCoordMap)
+            return;
+        const host = coordMapRef.current;
+        if (!host)
+            return;
+        if (coordLeaflet.current) {
+            coordLeaflet.current.invalidateSize();
+            return;
+        }
+        const map = L.map(host, { worldCopyJump: true, zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+        let marker = null;
+        map.on('click', (e) => {
+            const lat = Number(e.latlng.lat.toFixed(6));
+            const lon = Number(e.latlng.lng.toFixed(6));
+            setCoordCandidate({ lat, lon });
+            if (marker)
+                marker.remove();
+            marker = L.marker([lat, lon]).addTo(map);
+        });
+        coordLeaflet.current = map;
+        setTimeout(() => map.invalidateSize(), 100);
+        return () => { };
+    }, [showCoordMap]);
     const radarOption = useMemo(() => ({
         backgroundColor: 'transparent',
         textStyle: { color: '#bfc7d5' },
@@ -371,7 +529,7 @@ export function App() {
                     { name: '金 (肃杀)', max: 10 },
                     { name: '水 (润下)', max: 10 }
                 ],
-                name: { color: textColor },
+                axisName: { color: textColor },
                 axisLine: { lineStyle: { color: gridColor } },
                 splitLine: { lineStyle: { color: [gridColor] } },
                 splitArea: { areaStyle: { color: ['transparent', isDarkTheme ? 'rgba(212,175,55,0.06)' : 'rgba(184,134,11,0.06)'] } }
@@ -751,13 +909,7 @@ export function App() {
                     return lines.join('');
                 }
             },
-            legend: {
-                bottom: 4,
-                left: 'center',
-                itemGap: 12,
-                textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 11 },
-                data: children.map((c) => c.name)
-            },
+            legend: { show: false },
             series: [{
                     type: 'sunburst',
                     radius: ['28%', '84%'],
@@ -886,13 +1038,7 @@ export function App() {
                     return '';
                 }
             },
-            legend: {
-                top: 2,
-                right: 6,
-                itemGap: 10,
-                textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 11 },
-                data: Object.keys(buckets)
-            },
+            legend: { show: false },
             series: [{
                     type: 'sankey',
                     left: 28, right: 76, top: 12, bottom: 12,
@@ -911,6 +1057,192 @@ export function App() {
         };
     }, [data]);
     const kinGraphRef = useEchart(kinGraphOption);
+    // 紫微命盘（标准12宫布局）- 使用 ECharts Custom Series 绘制高质感栅格
+    const ziweiOption = useMemo(() => {
+        if (!data)
+            return { series: [] };
+        const isDark = document.documentElement.classList.contains('dark');
+        const natalPalaces = data.ziwei?.palaces;
+        const transitPalaces = zwTransit?.palaces;
+        const normalize = (arr) => (Array.isArray(arr) && arr.length > 0
+            ? arr.map((p) => ({ key: String(p?.key || ''), name: String(p?.name || ''), branch: String(p?.branch || ''), stars: Array.isArray(p?.stars) ? p.stars : [] }))
+            : null);
+        const basePalaces = normalize(natalPalaces) || [];
+        const overlayPalaces = zwTransitTab !== 'natal' ? normalize(transitPalaces) : null;
+        const palaceData = basePalaces;
+        const palaceNames = Array.isArray(basePalaces)
+            ? basePalaces.map((p) => String(p?.name || ''))
+            : [];
+        // 4x4 外环布局（中间2x2留白）- 顺时针从左上开始
+        const layout = [
+            { r: 0, c: 0 }, { r: 0, c: 1 }, { r: 0, c: 2 }, { r: 0, c: 3 },
+            { r: 1, c: 3 }, { r: 2, c: 3 },
+            { r: 3, c: 3 }, { r: 3, c: 2 }, { r: 3, c: 1 }, { r: 3, c: 0 },
+            { r: 2, c: 0 }, { r: 1, c: 0 }
+        ];
+        const cell = { w: 1 / 4, h: 1 / 4 };
+        // 直接基于 isDark 映射主题色，确保切换时立即生效
+        const bg = isDark ? '#0e131a' : '#ffffff';
+        // 明色主题采用与全局风格契合的金色边框
+        const border = isDark ? 'rgba(212,175,55,0.35)' : 'rgba(184,134,11,0.45)';
+        const titleColor = isDark ? '#e5e7eb' : '#0f172a';
+        const subColor = isDark ? 'rgba(148,163,184,0.9)' : 'rgba(71,85,105,0.9)';
+        const colorOfType = {
+            main: '#ffd166',
+            assist: '#a3e635',
+            transform: '#60a5fa',
+            misc: isDark ? '#cbd5e1' : '#475569'
+        };
+        const series = {
+            type: 'custom',
+            coordinateSystem: 'none',
+            renderItem: (_params, api) => {
+                let idx = Number(api.value(0));
+                if (!Number.isFinite(idx))
+                    idx = 0;
+                const rc = layout[idx];
+                if (!rc)
+                    return { type: 'group', children: [] };
+                const W = api.getWidth();
+                const H = api.getHeight();
+                // 将单元间距平均分配到左右/上下，避免右下角被裁切
+                const pad = Math.min(W, H) * 0.02;
+                const cw = W * cell.w;
+                const ch = H * cell.h;
+                const x = rc.c * cw + pad * 0.5;
+                const y = rc.r * ch + pad * 0.5;
+                const w = cw - pad;
+                const h = ch - pad;
+                const name = (palaceNames && palaceNames[idx]) ? palaceNames[idx] : '';
+                const palObj = (Array.isArray(basePalaces) && basePalaces[idx]) ? basePalaces[idx] : null;
+                const branch = palObj?.branch ? String(palObj.branch) : '';
+                const starsAtPal = Array.isArray(palObj?.stars) ? palObj.stars : [];
+                const isShen = Array.isArray(starsAtPal) && starsAtPal.some((s) => String(s?.name) === '身宫');
+                const title = `${name}${branch ? `（${branch}${isShen ? '·身' : ''}）` : (isShen ? '（身）' : '')}`;
+                const focus = typeof zwFocus === 'number' ? zwFocus : null;
+                const tri = Array.isArray(data.ziwei?.meta?.triSquares) ? data.ziwei.meta.triSquares : null;
+                const setOf = (i) => new Set(Array.isArray(tri) && Array.isArray(tri[i]) ? tri[i] : [i, (i + 4) % 12, (i + 8) % 12, (i + 6) % 12]);
+                const highlight = focus != null ? setOf(focus) : null;
+                const isInFocus = focus != null && highlight?.has(idx);
+                const group = {
+                    type: 'group',
+                    // 裁剪到宫位矩形，避免任何内容溢出
+                    clipPath: { type: 'rect', shape: { x, y, width: w, height: h, r: 12 } },
+                    children: [
+                        {
+                            type: 'rect', shape: { x, y, width: w, height: h, r: 12 },
+                            style: { fill: bg, stroke: border, lineWidth: isDark ? 1 : 0.9, cursor: 'pointer' },
+                            silent: false
+                        },
+                        ...(isInFocus ? [{ type: 'rect', shape: { x: x + 3, y: y + 3, width: w - 6, height: h - 6, r: 12 }, style: { stroke: '#d4af37', lineWidth: 2, fill: 'transparent' }, silent: true }] : []),
+                        {
+                            type: 'text', style: { x: x + 12, y: y + 10, text: title, fill: titleColor, font: '600 13px "Noto Sans SC", system-ui' }
+                        },
+                        ...(() => {
+                            const safePal = Array.isArray(basePalaces) && basePalaces[idx] ? basePalaces[idx] : { stars: [] };
+                            const stars = Array.isArray(safePal?.stars) ? safePal.stars : [];
+                            const rows = Math.max(1, Math.ceil(stars.length / 2));
+                            const availableTextHeight = Math.max(0, h - 38);
+                            const lineH = Math.max(14, Math.min(18, availableTextHeight / rows));
+                            const fsMain = Math.max(12, Math.min(14, lineH - 2));
+                            const fsMinor = Math.max(11, Math.min(13, lineH - 3));
+                            const baseY = y + 32;
+                            return stars.map((s, si) => ({
+                                type: 'text',
+                                style: {
+                                    x: x + 12 + (si % 2) * (w / 2),
+                                    y: baseY + Math.floor(si / 2) * lineH,
+                                    text: String(s?.name || ''),
+                                    fill: colorOfType[s.type],
+                                    font: s.type === 'main' ? `600 ${fsMain}px "Noto Sans SC", system-ui` : `${fsMinor}px "Noto Sans SC", system-ui`
+                                }
+                            }));
+                        })(),
+                        ...(() => {
+                            if (!Array.isArray(overlayPalaces))
+                                return [];
+                            const pal = overlayPalaces[idx];
+                            const list = Array.isArray(pal?.stars) ? pal.stars : [];
+                            const rows = Math.max(1, Math.ceil(list.length / 2));
+                            const availableTextHeight = Math.max(0, h - 38);
+                            const lineH = Math.max(14, Math.min(18, availableTextHeight / rows));
+                            const fsMain = Math.max(11, Math.min(13, lineH - 3));
+                            const fsMinor = Math.max(10, Math.min(12, lineH - 4));
+                            const baseY = y + 32;
+                            return list.map((s, si) => ({
+                                type: 'text',
+                                style: {
+                                    x: x + 12 + (si % 2) * (w / 2),
+                                    y: baseY + Math.floor(si / 2) * lineH,
+                                    text: '· ' + String(s?.name || ''),
+                                    fill: colorOfType[s.type],
+                                    opacity: 0.65,
+                                    font: s.type === 'main' ? `500 ${fsMain}px "Noto Sans SC", system-ui` : `${fsMinor}px "Noto Sans SC", system-ui`
+                                }
+                            }));
+                        })()
+                    ]
+                };
+                return group;
+            },
+            data: (Array.isArray(palaceData) && palaceData.length === 12)
+                ? Array.from({ length: 12 }, (_, i) => [i])
+                : []
+        };
+        return {
+            backgroundColor: 'transparent',
+            animation: false,
+            // 明确指定无坐标系
+            coordinateSystem: 'none',
+            tooltip: {
+                show: true,
+                backgroundColor: isDark ? 'rgba(14,19,26,0.95)' : 'rgba(255,255,255,0.95)',
+                borderColor: isDark ? 'rgba(212,175,55,0.2)' : 'rgba(212,175,55,0.3)',
+                borderWidth: 1,
+                textStyle: { color: isDark ? '#e5e7eb' : '#374151', fontSize: 12 },
+                formatter: (p) => {
+                    const raw = Array.isArray(p?.data) ? p.data : [];
+                    const idx = typeof raw[0] === 'number' ? raw[0] : 0;
+                    const pal = (Array.isArray(basePalaces) && basePalaces[idx]) ? basePalaces[idx] : { name: '', stars: [] };
+                    const list = Array.isArray(pal.stars) ? pal.stars : [];
+                    const chips = list.map((s) => {
+                        const c = colorOfType[(s?.type || 'misc')];
+                        const n = String(s?.name || '');
+                        return `<span style=\"display:inline-flex;align-items:center;margin-right:6px;color:${c}\">●</span>${n}`;
+                    }).filter(Boolean).join('、');
+                    if (Array.isArray(overlayPalaces)) {
+                        const pal2 = overlayPalaces[idx] || { stars: [] };
+                        const list2 = Array.isArray(pal2?.stars) ? pal2.stars : [];
+                        const chips2 = list2.map((s) => String(s?.name || '')).filter(Boolean).join('、');
+                        const tag = `<span class=\"chip\" style=\"margin-left:6px\">${zwTransitTab === 'year' ? '流年' : zwTransitTab === 'month' ? '流月' : zwTransitTab === 'day' ? '流日' : '本命'}<\/span>`;
+                        return `<div style=\"font-weight:600;color:var(--gold)\">${pal.name || ''}</div>` +
+                            `<div style=\"margin-top:4px;color:${subColor}\">${chips || '—'}${tag}</div>` +
+                            (chips2 ? `<div style=\"margin-top:2px;opacity:.75\">流：${chips2}</div>` : '');
+                    }
+                    return `<div style=\"font-weight:600;color:var(--gold)\">${pal.name || ''}</div>` +
+                        `<div style=\"margin-top:4px;color:${subColor}\">${chips || '—'}</div>`;
+                }
+            },
+            series: [series]
+        };
+    }, [data, zwFocus, isDark, zwTransit, zwTransitTab]);
+    const ziweiRef = useEchart(ziweiOption);
+    // 点击高亮三方四正
+    useEffect(() => {
+        const el = ziweiRef?.current;
+        if (!el)
+            return;
+        const chart = echarts.getInstanceByDom(el);
+        if (!chart)
+            return;
+        const handler = (ev) => {
+            if (Array.isArray(ev?.data) && typeof ev.data[0] === 'number') {
+                setZwFocus((prev) => prev === ev.data[0] ? null : ev.data[0]);
+            }
+        };
+        chart.on('click', handler);
+        return () => { chart.off('click', handler); };
+    }, [ziweiRef]);
     // 当图谱 Tab 切换时，强制触发对应 ECharts 实例 resize，保证在隐藏->显示后仍然正确居中
     useEffect(() => {
         const tryResize = (refAny) => {
@@ -929,6 +1261,8 @@ export function App() {
             tryResize(palaceGraphRef);
         if (graphTab === 'kin')
             tryResize(kinGraphRef);
+        if (graphTab === 'ziwei')
+            tryResize(ziweiRef);
     }, [graphTab]);
     const [timeline, setTimeline] = useState(null);
     function getApiBase() {
@@ -941,22 +1275,85 @@ export function App() {
         const y = new Date().getFullYear();
         axios.get(base + '/api/timeline/' + y).then(r => setTimeline(r.data.months)).catch(() => { });
     }, []);
+    async function loadZiweiTransit() {
+        try {
+            const base = getApiBase();
+            const payload = {
+                datetime: new Date(zwTransitDate).toISOString(),
+                timezone: form.timezone
+            };
+            const resp = await axios.post(base + '/api/ziwei/transit', payload);
+            setZwTransit(resp.data?.base || null);
+        }
+        catch (_) {
+            setZwTransit(null);
+        }
+    }
+    // 当切换到紫微 + 选择流年/月/日时自动加载
+    useEffect(() => {
+        if (graphTab === 'ziwei' && zwTransitTab !== 'natal') {
+            loadZiweiTransit();
+        }
+    }, [graphTab, zwTransitTab, zwTransitDate, form.timezone]);
+    // URL 查询参数同步（zt: natal/year/month/day, zd: datetime-local）
+    useEffect(() => {
+        try {
+            const qs = new URLSearchParams(window.location.search);
+            const zt = qs.get('zt');
+            const zd = qs.get('zd');
+            if (zt && ['natal', 'year', 'month', 'day'].includes(zt)) {
+                setZwTransitTab(zt);
+            }
+            if (zd) {
+                setZwTransitDate(zd);
+            }
+        }
+        catch { }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    useEffect(() => {
+        try {
+            const url = new URL(window.location.href);
+            const qs = url.searchParams;
+            qs.set('zt', zwTransitTab);
+            qs.set('zd', zwTransitDate);
+            window.history.replaceState({}, '', `${url.pathname}?${qs.toString()}`);
+        }
+        catch { }
+    }, [zwTransitTab, zwTransitDate]);
     async function onSubmit(e) {
         e.preventDefault();
         setError(null);
         setLoading(true);
         try {
+            let iso = new Date(form.datetime).toISOString();
+            if (calendar === 'lunar') {
+                const base = getApiBase();
+                const y = parseInt(lunar.year, 10), m = parseInt(lunar.month, 10), d = parseInt(lunar.day, 10);
+                const hh = parseInt(lunar.hour || '0', 10) || 0;
+                const mm = parseInt(lunar.minute || '0', 10) || 0;
+                if (!y || !m || !d)
+                    throw new Error('请输入有效的农历年月日');
+                const resp = await axios.post(base + '/api/convert-lunar', { lunar: { year: y, month: m, day: d, isLeap: !!lunar.isLeap, hour: hh, minute: mm, second: 0 }, timezone: form.timezone });
+                iso = resp.data?.iso || iso;
+            }
             const payload = {
-                datetime: new Date(form.datetime).toISOString(),
+                datetime: iso,
                 timezone: form.timezone,
-                gender: form.gender
+                gender: form.gender,
+                useTrueSolarTime: form.useTrueSolarTime || undefined
             };
             if (form.useTrueSolarTime) {
                 const lat = parseFloat(form.lat);
                 const lon = parseFloat(form.lon);
-                if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+                const latOk = !Number.isNaN(lat) && lat >= -90 && lat <= 90;
+                const lonOk = !Number.isNaN(lon) && lon >= -180 && lon <= 180;
+                if (latOk && lonOk) {
                     payload.useTrueSolarTime = true;
                     payload.location = { lat, lon };
+                }
+                else {
+                    throw new Error('真太阳时开启时，请输入有效经纬度（纬度 -90~90， 经度 -180~180）');
                 }
             }
             const base = getApiBase();
@@ -1000,12 +1397,80 @@ export function App() {
         setProfiles([]);
         localStorage.removeItem(LS_KEY);
     }
-    return (_jsxs("div", { className: "min-h-screen", children: [_jsxs("header", { className: "px-6 py-4 border-b border-gray-800 flex items-center justify-between", children: [_jsxs("h1", { className: "text-xl tracking-widest gold", children: ["DESTINY \u00B7 ", t('title')] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsx("button", { onClick: exportPDF, className: "btn text-xs", children: t('export') }), _jsx("button", { onClick: () => setIsDark(v => !v), className: "btn text-xs", title: t('theme'), children: isDark ? t('dark') : t('light') }), _jsxs("select", { value: lang, onChange: e => setLang(e.target.value), className: "select text-xs", children: [_jsx("option", { value: "zh", children: "\u4E2D\u6587" }), _jsx("option", { value: "en", children: "EN" })] })] })] }), _jsxs("main", { className: "px-10 py-4 grid grid-cols-1 lg:grid-cols-3 gap-6", children: [_jsxs("section", { className: "card p-4 lg:col-span-1", children: [_jsx("h2", { className: "mb-3 text-sm text-gray-300", children: t('input') }), _jsxs("form", { className: "space-y-3", onSubmit: onSubmit, children: [error && _jsx("div", { className: "alert alert-error", children: error }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('datetime') }), _jsx("input", { className: "w-full input", type: "datetime-local", value: form.datetime, onChange: e => setForm(prev => ({ ...prev, datetime: e.target.value })) })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('timezone') }), _jsx("input", { className: "w-full input", placeholder: "Asia/Shanghai", value: form.timezone, onChange: e => setForm(prev => ({ ...prev, timezone: e.target.value })) })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { id: "trueSolar", type: "checkbox", className: "h-4 w-4", checked: form.useTrueSolarTime, onChange: e => setForm(prev => ({ ...prev, useTrueSolarTime: e.target.checked })) }), _jsx("label", { htmlFor: "trueSolar", className: "text-xs muted", children: t('trueSolar') })] }), _jsxs("div", { className: "grid grid-cols-2 gap-2", children: [_jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('latitude') }), _jsx("input", { className: "w-full input", placeholder: "31.23", value: form.lat, onChange: e => setForm(prev => ({ ...prev, lat: e.target.value })), disabled: !form.useTrueSolarTime })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('longitude') }), _jsx("input", { className: "w-full input", placeholder: "121.47", value: form.lon, onChange: e => setForm(prev => ({ ...prev, lon: e.target.value })), disabled: !form.useTrueSolarTime })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('gender') }), _jsxs("select", { className: "w-full select", value: form.gender, onChange: e => setForm(prev => ({ ...prev, gender: e.target.value })), children: [_jsx("option", { value: "male", children: t('male') }), _jsx("option", { value: "female", children: t('female') })] })] }), _jsxs("div", { className: "flex gap-2", children: [_jsx("button", { disabled: loading, className: "flex-1 btn btn-primary mt-2", children: loading ? t('calculating') : t('submit') }), _jsx("button", { type: "button", onClick: () => {
+    return (_jsxs("div", { className: "min-h-screen", children: [_jsxs("header", { className: "px-6 py-4 border-b border-gray-800 flex items-center justify-between", children: [_jsxs("h1", { className: "text-xl tracking-widest gold", children: ["DESTINY \u00B7 ", t('title')] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsx("button", { onClick: exportPDF, className: "btn text-xs", children: t('export') }), _jsx("button", { onClick: () => setIsDark(v => !v), className: "btn text-xs", title: t('theme'), children: isDark ? t('dark') : t('light') }), _jsxs("select", { value: lang, onChange: e => setLang(e.target.value), className: "select text-xs", children: [_jsx("option", { value: "zh", children: "\u4E2D\u6587" }), _jsx("option", { value: "en", children: "EN" })] })] })] }), _jsxs("main", { className: "px-10 py-4 grid grid-cols-1 lg:grid-cols-3 gap-6", children: [_jsxs("section", { className: "card p-4 lg:col-span-1", children: [_jsx("h2", { className: "mb-3 text-sm text-gray-300", children: t('input') }), _jsxs("form", { className: "space-y-3", onSubmit: onSubmit, children: [error && _jsx("div", { className: "alert alert-error", children: error }), _jsxs("div", { className: "grid grid-cols-2 gap-2", children: [_jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('calendar') }), _jsxs("select", { className: "w-full select", value: calendar, onChange: e => setCalendar(e.target.value), children: [_jsx("option", { value: "gregorian", children: t('gregorian') }), _jsx("option", { value: "lunar", children: t('lunar') })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('timezone') }), _jsxs("div", { className: "flex gap-2", children: [_jsx("input", { className: "w-full input tz-input", placeholder: "Asia/Shanghai", value: form.timezone, onChange: e => setForm(prev => ({ ...prev, timezone: e.target.value })), onClick: () => setShowTzMap(true), readOnly: true }), _jsx("button", { type: "button", className: "btn text-xs", onClick: () => setShowTzMap(true), children: t('tzPickOnMap') })] })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('datetime') }), _jsxs("div", { className: "input-group", children: [_jsx("span", { className: "icon", children: "\uD83D\uDCC5" }), (() => {
+                                                        const LunarInput = forwardRef(({ value, onClick }, ref) => (_jsx("input", { ref: ref, onClick: onClick, readOnly: true, className: "w-full input date-input", value: value || '', placeholder: "\u9009\u62E9\u65E5\u671F" })));
+                                                        const commonProps = {
+                                                            showTimeSelect: true,
+                                                            timeIntervals: 15,
+                                                            dateFormat: 'yyyy-MM-dd HH:mm',
+                                                            calendarStartDay: 1,
+                                                            showMonthDropdown: true,
+                                                            showYearDropdown: true,
+                                                            dropdownMode: 'select'
+                                                        };
+                                                        if (calendar === 'gregorian') {
+                                                            return (_jsx(DatePicker, { selected: gregDate, onChange: (d) => {
+                                                                    const val = d || new Date();
+                                                                    setGregDate(val);
+                                                                    const local = new Date(val.getTime() - val.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+                                                                    setForm(prev => ({ ...prev, datetime: local }));
+                                                                }, className: "w-full input date-input", ...commonProps }));
+                                                        }
+                                                        // lunar mode — use the same picker UI for quick month/year switch, but interpret the picked Y/M/D/H/m as LUNAR values
+                                                        const display = `农历 ${lunar.year}-${lunar.month}-${lunar.day}${lunar.isLeap ? '(闰)' : ''} ${String(lunar.hour).padStart(2, '0')}:${String(lunar.minute).padStart(2, '0')}`;
+                                                        return (_jsx(DatePicker, { selected: gregDate, onChange: async (d) => {
+                                                                const val = d || new Date();
+                                                                setGregDate(val);
+                                                                // Interpret picker selection as lunar Y/M/D/H/m directly
+                                                                const ly = val.getFullYear();
+                                                                const lm = val.getMonth() + 1;
+                                                                const ld = val.getDate();
+                                                                const hh = val.getHours();
+                                                                const mm = val.getMinutes();
+                                                                setLunar({ year: String(ly), month: String(lm), day: String(ld), isLeap: Boolean(lunar.isLeap), hour: String(hh), minute: String(mm) });
+                                                                try {
+                                                                    const base = getApiBase();
+                                                                    const rr = await axios.post(base + '/api/convert-lunar', { lunar: { year: ly, month: lm, day: ld, isLeap: Boolean(lunar.isLeap), hour: hh, minute: mm, second: 0 }, timezone: form.timezone });
+                                                                    const iso = String(rr.data?.iso || '');
+                                                                    if (iso) {
+                                                                        setLunarDerivedISO(iso);
+                                                                        setForm(prev => ({ ...prev, datetime: iso.slice(0, 16) }));
+                                                                    }
+                                                                }
+                                                                catch { }
+                                                            }, customInput: _jsx(LunarInput, { value: display }), ...commonProps }));
+                                                    })()] }), calendar === 'lunar' && (_jsxs("div", { className: "mt-2 flex items-center gap-3", children: [_jsxs("div", { className: "text-[11px] muted", children: ["\u5BF9\u5E94\u516C\u5386\uFF1A", lunarDerivedISO ? new Date(lunarDerivedISO).toLocaleString() : '—'] }), _jsxs("label", { className: "text-[11px] muted flex items-center gap-1", children: [_jsx("input", { type: "checkbox", className: "h-4 w-4", checked: lunar.isLeap, onChange: async (e) => {
+                                                                    const isLeap = e.target.checked;
+                                                                    const ly = parseInt(lunar.year, 10) || new Date().getFullYear();
+                                                                    const lm = parseInt(lunar.month, 10) || 1;
+                                                                    const ld = parseInt(lunar.day, 10) || 1;
+                                                                    const hh = parseInt(lunar.hour || '0', 10) || 0;
+                                                                    const mm = parseInt(lunar.minute || '0', 10) || 0;
+                                                                    setLunar(p => ({ ...p, isLeap }));
+                                                                    try {
+                                                                        const base = getApiBase();
+                                                                        const rr = await axios.post(base + '/api/convert-lunar', { lunar: { year: ly, month: lm, day: ld, isLeap, hour: hh, minute: mm, second: 0 }, timezone: form.timezone });
+                                                                        const iso = String(rr.data?.iso || '');
+                                                                        if (iso) {
+                                                                            setLunarDerivedISO(iso);
+                                                                            setForm(prev => ({ ...prev, datetime: iso.slice(0, 16) }));
+                                                                        }
+                                                                    }
+                                                                    catch { }
+                                                                } }), " \u95F0\u6708"] })] }))] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { id: "trueSolar", type: "checkbox", className: "h-4 w-4", checked: form.useTrueSolarTime, onChange: e => setForm(prev => ({ ...prev, useTrueSolarTime: e.target.checked })) }), _jsx("label", { htmlFor: "trueSolar", className: "text-xs muted", children: t('trueSolar') })] }), _jsxs("div", { className: "grid grid-cols-2 gap-2", children: [_jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('latitude') }), _jsxs("div", { className: "flex gap-2", children: [_jsx("input", { className: "w-full input", placeholder: "31.23", value: form.lat, onChange: e => setForm(prev => ({ ...prev, lat: e.target.value })), disabled: !form.useTrueSolarTime }), _jsx("button", { type: "button", className: "btn text-xs", onClick: () => setShowCoordMap(true), disabled: !form.useTrueSolarTime, children: t('coordPickOnMap') })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('longitude') }), _jsx("input", { className: "w-full input", placeholder: "121.47", value: form.lon, onChange: e => setForm(prev => ({ ...prev, lon: e.target.value })), disabled: !form.useTrueSolarTime })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs muted mb-1", children: t('gender') }), _jsxs("select", { className: "w-full select", value: form.gender, onChange: e => setForm(prev => ({ ...prev, gender: e.target.value })), children: [_jsx("option", { value: "male", children: t('male') }), _jsx("option", { value: "female", children: t('female') })] })] }), _jsxs("div", { className: "flex gap-2", children: [_jsx("button", { disabled: loading, className: "flex-1 btn btn-primary mt-2", children: loading ? t('calculating') : t('submit') }), _jsx("button", { type: "button", onClick: () => {
                                                     const p = { id: `${Date.now()}`, datetime: form.datetime, timezone: form.timezone, gender: form.gender, createdAt: Date.now() };
                                                     const next = [p, ...profiles].slice(0, 20);
                                                     setProfiles(next);
                                                     localStorage.setItem(LS_KEY, JSON.stringify(next));
-                                                }, className: "btn text-xs mt-2", children: t('save') })] })] }), profiles.length > 0 && (_jsxs("div", { className: "mt-4", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsx("h3", { className: "text-xs text-gray-400", children: t('history') }), _jsx("button", { onClick: clearHistory, className: "text-[10px] text-gray-400", children: "\u6E05\u7A7A" })] }), _jsx("div", { className: "space-y-2 max-h-60 overflow-y-auto pr-1", children: profiles.map(p => (_jsxs("div", { className: "list-item", children: [_jsx("div", { className: "text-xs muted", children: p.datetime.replace('T', ' ') }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "chip", children: p.gender === 'male' ? '男' : '女' }), _jsx("button", { onClick: () => loadProfile(p), className: "btn text-[10px] px-2 py-0.5", children: "\u52A0\u8F7D" })] })] }, p.id))) })] }))] }), _jsxs("section", { className: "card card-stretch p-4 lg:col-span-2", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsx("h2", { className: "text-sm muted", children: t('five') }), data && (_jsxs("div", { className: "text-[11px] muted flex gap-2", children: [_jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.wood }, children: ["\u6728 ", data.fiveElementPower.wood.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.fire }, children: ["\u706B ", data.fiveElementPower.fire.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.earth }, children: ["\u571F ", data.fiveElementPower.earth.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.metal }, children: ["\u91D1 ", data.fiveElementPower.metal.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.water }, children: ["\u6C34 ", data.fiveElementPower.water.toFixed(2)] })] }))] }), _jsx("div", { className: "radar-box", children: _jsx("div", { ref: enhancedRadarRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { className: "panel-note-fixed text-xs muted", children: "\u63D0\u793A\uFF1A\u9F20\u6807\u60AC\u505C\u67E5\u770B\u5404\u9879\u5177\u4F53\u6570\u503C\uFF1B\"\u6728/\u706B/\u571F/\u91D1/\u6C34\"\u5206\u522B\u5BF9\u5E94\u751F\u53D1/\u708E\u4E0A/\u7A3C\u7A51/\u8083\u6740/\u6DA6\u4E0B\u3002" })] }), data && (_jsxs("section", { className: "card p-4 lg:col-span-3", children: [_jsx("h2", { className: "mb-3 text-sm muted", children: t('bazi') }), _jsx("div", { className: "grid grid-cols-2 lg:grid-cols-4 gap-4 text-center", children: [
+                                                }, className: "btn text-xs mt-2", children: t('save') })] })] }), showTzMap && (_jsx("div", { className: "modal-backdrop", onClick: () => setShowTzMap(false), children: _jsxs("div", { className: "modal", onClick: e => e.stopPropagation(), children: [_jsxs("div", { className: "modal-header", children: [_jsxs("div", { className: "text-sm", children: [t('timezone'), " / ", t('tzPickOnMap')] }), _jsx("button", { className: "btn text-xs", onClick: () => setShowTzMap(false), children: "\u2715" })] }), _jsxs("div", { className: "modal-body", children: [_jsx("div", { ref: tzMapRef, style: { width: '100%', height: 320, borderRadius: 8 } }), _jsxs("div", { className: "flex items-center justify-between mt-2", children: [_jsx("div", { className: "text-xs", children: tzCandidate ? `已选择：${tzCandidate}` : '点击地图选择时区（按经度近似）' }), _jsxs("div", { className: "flex gap-2", children: [_jsx("button", { className: "btn text-xs", onClick: () => setTzCandidate(Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'), children: "\u4F7F\u7528\u672C\u673A" }), _jsx("button", { className: "btn btn-primary text-xs", disabled: !tzCandidate, onClick: () => { if (tzCandidate) {
+                                                                        setForm(p => ({ ...p, timezone: tzCandidate }));
+                                                                        setShowTzMap(false);
+                                                                    } }, children: "\u5E94\u7528" })] })] })] })] }) })), showCoordMap && (_jsx("div", { className: "modal-backdrop", onClick: () => setShowCoordMap(false), children: _jsxs("div", { className: "modal", onClick: e => e.stopPropagation(), children: [_jsxs("div", { className: "modal-header", children: [_jsx("div", { className: "text-sm", children: t('coordPickOnMap') }), _jsx("button", { className: "btn text-xs", onClick: () => setShowCoordMap(false), children: "\u2715" })] }), _jsxs("div", { className: "modal-body", children: [_jsx("div", { ref: coordMapRef, style: { width: '100%', height: 360, borderRadius: 8 } }), _jsxs("div", { className: "flex items-center justify-between mt-2", children: [_jsx("div", { className: "text-xs", children: coordCandidate ? `坐标：${coordCandidate.lat}, ${coordCandidate.lon}` : '点击世界地图设置经纬度（等矩形近似）' }), _jsx("div", { className: "flex gap-2", children: _jsx("button", { className: "btn btn-primary text-xs", disabled: !coordCandidate, onClick: () => {
+                                                                    if (coordCandidate) {
+                                                                        setForm(p => ({ ...p, lat: String(coordCandidate.lat), lon: String(coordCandidate.lon) }));
+                                                                        setShowCoordMap(false);
+                                                                    }
+                                                                }, children: "\u5E94\u7528" }) })] })] })] }) })), profiles.length > 0 && (_jsxs("div", { className: "mt-4", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsx("h3", { className: "text-xs text-gray-400", children: t('history') }), _jsx("button", { onClick: clearHistory, className: "text-[10px] text-gray-400", children: "\u6E05\u7A7A" })] }), _jsx("div", { className: "space-y-2 max-h-60 overflow-y-auto pr-1", children: profiles.map(p => (_jsxs("div", { className: "list-item", children: [_jsx("div", { className: "text-xs muted", children: p.datetime.replace('T', ' ') }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "chip", children: p.gender === 'male' ? '男' : '女' }), _jsx("button", { onClick: () => loadProfile(p), className: "btn text-[10px] px-2 py-0.5", children: "\u52A0\u8F7D" })] })] }, p.id))) })] }))] }), _jsxs("section", { className: "card card-stretch p-4 lg:col-span-2", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsx("h2", { className: "text-sm muted", children: t('five') }), data && (_jsxs("div", { className: "text-[11px] muted flex gap-2", children: [_jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.wood }, children: ["\u6728 ", data.fiveElementPower.wood.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.fire }, children: ["\u706B ", data.fiveElementPower.fire.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.earth }, children: ["\u571F ", data.fiveElementPower.earth.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.metal }, children: ["\u91D1 ", data.fiveElementPower.metal.toFixed(2)] }), _jsxs("span", { className: "chip", style: { color: ELEMENT_COLOR.water }, children: ["\u6C34 ", data.fiveElementPower.water.toFixed(2)] })] }))] }), _jsx("div", { className: "radar-box", children: _jsx("div", { ref: enhancedRadarRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { className: "panel-note-fixed text-xs muted", children: "\u63D0\u793A\uFF1A\u9F20\u6807\u60AC\u505C\u67E5\u770B\u5404\u9879\u5177\u4F53\u6570\u503C\uFF1B\"\u6728/\u706B/\u571F/\u91D1/\u6C34\"\u5206\u522B\u5BF9\u5E94\u751F\u53D1/\u708E\u4E0A/\u7A3C\u7A51/\u8083\u6740/\u6DA6\u4E0B\u3002" })] }), data && (_jsxs("section", { className: "card p-4 lg:col-span-3", children: [_jsx("h2", { className: "mb-3 text-sm muted", children: t('bazi') }), _jsx("div", { className: "grid grid-cols-2 lg:grid-cols-4 gap-4 text-center", children: [
                                     { label: '年柱', p: data.year },
                                     { label: '月柱', p: data.month },
                                     { label: '日柱', p: data.day },
@@ -1092,6 +1557,6 @@ export function App() {
                                             { label: '时', items: byPillar['时'] }
                                         ];
                                         return (_jsxs("div", { className: "p-4 rounded-card bg-[var(--card)] border border-[var(--border)] md:col-span-2", children: [_jsxs("div", { className: "text-xs muted mb-2 tooltip", children: ["\u795E\u715E", _jsxs("div", { className: "tooltip-content", children: [_jsx("div", { children: "\u989C\u8272\u542B\u4E49\uFF1A" }), _jsxs("div", { className: "mt-1 flex gap-2 justify-center", children: [_jsx("span", { className: "ss-badge ss-sm ss-good", children: "\u8D35\u4EBA" }), _jsx("span", { className: "ss-badge ss-sm ss-neutral", children: "\u5409\u66DC" }), _jsx("span", { className: "ss-badge ss-sm ss-evil", children: "\u715E\u66DC" })] }), _jsx("div", { className: "text-[11px] muted mt-1", children: "\u7EFF=\u52A9\u76CA\uFF0C\u84DD=\u4E2D\u6027/\u8F85\u52A9\uFF0C\u7EA2=\u9700\u5236\u5316" })] })] }), _jsx("div", { className: "grid grid-cols-4 gap-3 text-center text-sm", children: cols.map((c, i) => (_jsxs("div", { children: [_jsx("div", { className: "text-[10px] muted", children: c.label }), _jsx("div", { className: "mt-1 flex flex-col items-center gap-2", children: c.items.length > 0 ? c.items.map((it, j) => (_jsxs("span", { className: `ss-badge ss-${groupVariant(it.group)} tooltip tooltip-top`, children: [it.name, _jsx("div", { className: "tooltip-content", children: STAR_DESC[it.name] || it.name })] }, j))) : _jsx("span", { className: "text-[11px] muted", children: "\u2014" }) })] }, i))) })] }));
-                                    })(), (data.graph || data.branchGraph) && (_jsxs("div", { className: "p-4 rounded-card bg-[var(--card)] border border-[var(--border)] md:col-span-2", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsxs("div", { className: "text-xs muted tooltip", children: ["\u5E72\u652F\u667A\u80FD\u56FE\u8C31", _jsxs("div", { className: "tooltip-content", children: [_jsx("div", { children: "\u56DB\u67F1\u5E72\u652F\u5173\u7CFB\u56FE\uFF0C\u663E\u793A\u751F\u514B\u5408\u51B2\u7B49\u5173\u7CFB" }), _jsx("div", { className: "mt-1", children: "\u5173\u7CFB\u5F3A\u5F31\u5F71\u54CD\u547D\u5C40\u5E73\u8861\u4E0E\u683C\u5C40\u9AD8\u4F4E" })] })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("button", { onClick: () => setGraphTab('stem'), className: `text-xs px-2 py-1 rounded ${graphTab === 'stem' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5929\u5E72" }), _jsx("button", { onClick: () => setGraphTab('branch'), className: `text-xs px-2 py-1 rounded ${graphTab === 'branch' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5730\u652F" }), _jsx("button", { onClick: () => setGraphTab('palace'), className: `text-xs px-2 py-1 rounded ${graphTab === 'palace' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5BAB\u4F4D" }), _jsx("button", { onClick: () => setGraphTab('kin'), className: `text-xs px-2 py-1 rounded ${graphTab === 'kin' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u516D\u4EB2" })] })] }), _jsxs("div", { className: "w-full", style: { minHeight: 320, display: 'grid', placeItems: 'center' }, children: [_jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'stem' ? 'block' : 'none' }, children: _jsx("div", { ref: graphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'branch' ? 'block' : 'none' }, children: _jsx("div", { ref: branchGraphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'palace' ? 'block' : 'none' }, children: _jsx("div", { ref: palaceGraphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'kin' ? 'block' : 'none' }, children: _jsx("div", { ref: kinGraphRef, style: { width: '100%', height: '100%' } }) })] }), _jsx("div", { className: "text-[11px] muted mt-2", children: graphTab === 'stem' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u65E5\u67F1\u5C45\u4E2D\uFF0C\u663E\u793A\u56DB\u67F1\u5929\u5E72\u95F4\u7684\u4E94\u884C\u751F\u514B\u5173\u7CFB" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-green-500 rounded mr-1" }), "\u751F\uFF1A\u76F8\u751F\u52A9\u529B", _jsx("span", { className: "inline-block w-2 h-2 bg-red-500 rounded mr-1 ml-3" }), "\u514B\uFF1A\u76F8\u514B\u5236\u7EA6", _jsx("span", { className: "inline-block w-2 h-2 bg-gray-500 rounded mr-1 ml-3" }), "\u540C\uFF1A\u540C\u6C14\u76F8\u6C42"] })] })) : graphTab === 'branch' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u663E\u793A\u56DB\u67F1\u5730\u652F\u95F4\u7684\u5408\u51B2\u5211\u5BB3\u5173\u7CFB" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-green-500 rounded mr-1" }), "\u5408\uFF1A\u516D\u5408\u4E09\u5408", _jsx("span", { className: "inline-block w-2 h-2 bg-red-600 rounded mr-1 ml-3" }), "\u51B2\uFF1A\u76F8\u51B2\u5BF9\u7ACB", _jsx("span", { className: "inline-block w-2 h-2 bg-orange-500 rounded mr-1 ml-3" }), "\u5BB3\uFF1A\u76F8\u5BB3\u963B\u6EDE", _jsx("span", { className: "inline-block w-2 h-2 bg-amber-700 rounded mr-1 ml-3" }), "\u5211\uFF1A\u76F8\u5211\u6CE2\u6298"] })] })) : graphTab === 'palace' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u4EE5\u65E5\u4E3B\u4E3A\u4E2D\u5FC3\uFF0C\u56DB\u67F1\u6620\u5C04\u81F3\u7236\u6BCD/\u5144\u5F1F/\u592B\u59BB/\u5B50\u5973\u5BAB\u4F4D\uFF1B\u8FB9\u6807\u6CE8\u5BF9\u5E94\u5341\u795E\u3002" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-indigo-500 rounded mr-1" }), "\u7236\u6BCD", _jsx("span", { className: "inline-block w-2 h-2 bg-slate-400 rounded mr-1 ml-3" }), "\u5144\u5F1F", _jsx("span", { className: "inline-block w-2 h-2 bg-amber-400 rounded mr-1 ml-3" }), "\u8D22/\u59BB", _jsx("span", { className: "inline-block w-2 h-2 bg-red-500 rounded mr-1 ml-3" }), "\u5B98/\u592B", _jsx("span", { className: "inline-block w-2 h-2 bg-emerald-500 rounded mr-1 ml-3" }), "\u5B50\u5973"] })] })) : graphTab === 'kin' ? (_jsx("div", { children: _jsx("div", { children: "\u8BF4\u660E\uFF1A\u516D\u4EB2\u5F3A\u5F31\u4E3A\u7EFC\u5408\u91CF\u5316\u503C\uFF080\u2013100 \u6807\u51C6\u5316\uFF09\u3002\u6765\u6E90\uFF1A\u5341\u795E\u660E\u7EC6\u52A0\u6743\uFF08\u5F3A/\u4E2D/\u5F31\u3001\u5E74/\u6708/\u65E5/\u65F6\u4E0E\u4EE3\u8868\u5341\u795E\u6743\u91CD\uFF09\uFF0C\u8FDE\u7EBF\u7C97\u7EC6\u4E0E\u989C\u8272\u4F53\u73B0\u76F8\u5BF9\u5F3A\u5EA6\u3002" }) })) : null })] }))] })] })), timeline && (_jsxs("section", { className: "card p-4 lg:col-span-3", children: [_jsx("h2", { className: "mb-3 text-sm text-gray-300", children: t('chart_months') }), _jsx("div", { className: "grid grid-cols-2 md:grid-cols-6 gap-3 text-center", children: timeline.map((m, i) => (_jsxs("div", { className: "p-3 rounded border border-[var(--border)] bg-[var(--card)]", children: [_jsxs("div", { className: "text-xs muted", children: [m.month, "\u6708"] }), _jsx("div", { className: "gold text-lg tracking-widest", children: m.pillar })] }, i))) })] }))] })] }));
+                                    })(), (data.graph || data.branchGraph) && (_jsxs("div", { className: "p-4 rounded-card bg-[var(--card)] border border-[var(--border)] md:col-span-2", children: [_jsxs("div", { className: "flex items-center justify-between mb-2", children: [_jsxs("div", { className: "text-xs muted tooltip", children: ["\u667A\u80FD\u56FE\u8C31", _jsxs("div", { className: "tooltip-content", children: [_jsx("div", { children: "\u56DB\u67F1\u5E72\u652F\u5173\u7CFB\u56FE\uFF0C\u663E\u793A\u751F\u514B\u5408\u51B2\u7B49\u5173\u7CFB" }), _jsx("div", { className: "mt-1", children: "\u5173\u7CFB\u5F3A\u5F31\u5F71\u54CD\u547D\u5C40\u5E73\u8861\u4E0E\u683C\u5C40\u9AD8\u4F4E" })] })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("button", { onClick: () => setGraphTab('stem'), className: `text-xs px-2 py-1 rounded ${graphTab === 'stem' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5929\u5E72" }), _jsx("button", { onClick: () => setGraphTab('branch'), className: `text-xs px-2 py-1 rounded ${graphTab === 'branch' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5730\u652F" }), _jsx("button", { onClick: () => setGraphTab('palace'), className: `text-xs px-2 py-1 rounded ${graphTab === 'palace' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u5BAB\u4F4D" }), _jsx("button", { onClick: () => setGraphTab('kin'), className: `text-xs px-2 py-1 rounded ${graphTab === 'kin' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u516D\u4EB2" }), _jsx("button", { onClick: () => setGraphTab('ziwei'), className: `text-xs px-2 py-1 rounded ${graphTab === 'ziwei' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u7D2B\u5FAE" })] })] }), _jsxs("div", { className: "w-full", style: { minHeight: 320, display: 'grid', placeItems: 'center' }, children: [graphTab === 'ziwei' && (_jsxs("div", { className: "flex items-center justify-between w-full max-w-[640px] mb-2", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("button", { onClick: () => setZwTransitTab('natal'), className: `text-xs px-2 py-1 rounded ${zwTransitTab === 'natal' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u672C\u547D" }), _jsx("button", { onClick: () => setZwTransitTab('year'), className: `text-xs px-2 py-1 rounded ${zwTransitTab === 'year' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u6D41\u5E74" }), _jsx("button", { onClick: () => setZwTransitTab('month'), className: `text-xs px-2 py-1 rounded ${zwTransitTab === 'month' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u6D41\u6708" }), _jsx("button", { onClick: () => setZwTransitTab('day'), className: `text-xs px-2 py-1 rounded ${zwTransitTab === 'day' ? 'bg-gold text-black' : 'text-muted hover:text-fg'}`, children: "\u6D41\u65E5" })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { type: "datetime-local", value: zwTransitDate, onChange: e => setZwTransitDate(e.target.value), className: "input text-xs", style: { height: 28, paddingTop: 2, paddingBottom: 2 } }), zwTransitTab !== 'natal' && (_jsx("button", { onClick: loadZiweiTransit, className: "btn text-xs", children: "\u5237\u65B0" }))] })] })), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'stem' ? 'block' : 'none' }, children: _jsx("div", { ref: graphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'branch' ? 'block' : 'none' }, children: _jsx("div", { ref: branchGraphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'palace' ? 'block' : 'none' }, children: _jsx("div", { ref: palaceGraphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', height: 320, display: graphTab === 'kin' ? 'block' : 'none' }, children: _jsx("div", { ref: kinGraphRef, style: { width: '100%', height: '100%' } }) }), _jsx("div", { style: { width: '100%', maxWidth: 640, aspectRatio: '1 / 1', height: 'auto', display: graphTab === 'ziwei' ? 'block' : 'none' }, children: _jsx("div", { ref: ziweiRef, style: { width: '100%', height: '100%' } }) })] }), _jsx("div", { className: "text-[11px] muted mt-2", children: graphTab === 'stem' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u65E5\u67F1\u5C45\u4E2D\uFF0C\u663E\u793A\u56DB\u67F1\u5929\u5E72\u95F4\u7684\u4E94\u884C\u751F\u514B\u5173\u7CFB" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-green-500 rounded mr-1" }), "\u751F\uFF1A\u76F8\u751F\u52A9\u529B", _jsx("span", { className: "inline-block w-2 h-2 bg-red-500 rounded mr-1 ml-3" }), "\u514B\uFF1A\u76F8\u514B\u5236\u7EA6", _jsx("span", { className: "inline-block w-2 h-2 bg-gray-500 rounded mr-1 ml-3" }), "\u540C\uFF1A\u540C\u6C14\u76F8\u6C42"] })] })) : graphTab === 'branch' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u663E\u793A\u56DB\u67F1\u5730\u652F\u95F4\u7684\u5408\u51B2\u5211\u5BB3\u5173\u7CFB" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-green-500 rounded mr-1" }), "\u5408\uFF1A\u516D\u5408\u4E09\u5408", _jsx("span", { className: "inline-block w-2 h-2 bg-red-600 rounded mr-1 ml-3" }), "\u51B2\uFF1A\u76F8\u51B2\u5BF9\u7ACB", _jsx("span", { className: "inline-block w-2 h-2 bg-orange-500 rounded mr-1 ml-3" }), "\u5BB3\uFF1A\u76F8\u5BB3\u963B\u6EDE", _jsx("span", { className: "inline-block w-2 h-2 bg-amber-700 rounded mr-1 ml-3" }), "\u5211\uFF1A\u76F8\u5211\u6CE2\u6298"] })] })) : graphTab === 'palace' ? (_jsxs("div", { children: [_jsx("div", { children: "\u8BF4\u660E\uFF1A\u4EE5\u65E5\u4E3B\u4E3A\u4E2D\u5FC3\uFF0C\u56DB\u67F1\u6620\u5C04\u81F3\u7236\u6BCD/\u5144\u5F1F/\u592B\u59BB/\u5B50\u5973\u5BAB\u4F4D\uFF1B\u8FB9\u6807\u6CE8\u5BF9\u5E94\u5341\u795E\u3002" }), _jsxs("div", { className: "mt-1", children: [_jsx("span", { className: "inline-block w-2 h-2 bg-indigo-500 rounded mr-1" }), "\u7236\u6BCD", _jsx("span", { className: "inline-block w-2 h-2 bg-slate-400 rounded mr-1 ml-3" }), "\u5144\u5F1F", _jsx("span", { className: "inline-block w-2 h-2 bg-amber-400 rounded mr-1 ml-3" }), "\u8D22/\u59BB", _jsx("span", { className: "inline-block w-2 h-2 bg-red-500 rounded mr-1 ml-3" }), "\u5B98/\u592B", _jsx("span", { className: "inline-block w-2 h-2 bg-emerald-500 rounded mr-1 ml-3" }), "\u5B50\u5973"] })] })) : graphTab === 'kin' ? (_jsx("div", { children: _jsx("div", { children: "\u8BF4\u660E\uFF1A\u516D\u4EB2\u5F3A\u5F31\u4E3A\u7EFC\u5408\u91CF\u5316\u503C\uFF080\u2013100 \u6807\u51C6\u5316\uFF09\u3002\u6765\u6E90\uFF1A\u5341\u795E\u660E\u7EC6\u52A0\u6743\uFF08\u5F3A/\u4E2D/\u5F31\u3001\u5E74/\u6708/\u65E5/\u65F6\u4E0E\u4EE3\u8868\u5341\u795E\u6743\u91CD\uFF09\uFF0C\u8FDE\u7EBF\u7C97\u7EC6\u4E0E\u989C\u8272\u4F53\u73B0\u76F8\u5BF9\u5F3A\u5EA6\u3002" }) })) : null })] }))] })] })), timeline && (_jsxs("section", { className: "card p-4 lg:col-span-3", children: [_jsx("h2", { className: "mb-3 text-sm text-gray-300", children: t('chart_months') }), _jsx("div", { className: "grid grid-cols-2 md:grid-cols-6 gap-3 text-center", children: timeline.map((m, i) => (_jsxs("div", { className: "p-3 rounded border border-[var(--border)] bg-[var(--card)]", children: [_jsxs("div", { className: "text-xs muted", children: [m.month, "\u6708"] }), _jsx("div", { className: "gold text-lg tracking-widest", children: m.pillar })] }, i))) })] }))] })] }));
 }
 //# sourceMappingURL=App.js.map
